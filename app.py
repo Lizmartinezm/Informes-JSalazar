@@ -376,16 +376,13 @@ excel_bytes = build_excel_report(
 )
 pdf_bytes = build_pdf_report(
     executive,
-    monthly_display,
-    payments_display,
-    sellers_display,
-    clients_display,
-    money_columns(tips, ["Propinas"]),
-    money_columns(
-        expenses_filtered.rename(columns={"MES": "Mes", "GASTOS": "Gastos"}).drop(columns=["NUMERO_MES"], errors="ignore"),
-        ["Gastos"],
-    ),
-    operating_display,
+    monthly.drop(columns=["NUMERO_MES"], errors="ignore"),
+    payments,
+    sellers,
+    clients,
+    tips,
+    expenses_filtered.rename(columns={"MES": "Mes", "GASTOS": "Gastos"}).drop(columns=["NUMERO_MES"], errors="ignore"),
+    operating,
     interpretation,
 )
 
