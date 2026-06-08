@@ -143,14 +143,62 @@ def clean_money(value: object) -> float:
     return -number if negative else number
 
 
-def clean_date(value: object) -> pd.Timestamp | pd.NaT:
+def _infer_expected_months_from_name(name: str | None) -> set[int]:
+    if not name:
+        return set()
+    found: list[int] = []
+    for token in re.split(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", str(name)):
+        month = normalize_month(token)
+        if month and month not in found:
+            found.append(month)
+    if len(found) >= 2:
+        start, end = found[0], found[-1]
+        if start <= end:
+            return set(range(start, end + 1))
+    return set(found)
+
+
+def _swap_month_day(timestamp: pd.Timestamp) -> pd.Timestamp | pd.NaT:
+    try:
+        return pd.Timestamp(year=timestamp.year, month=timestamp.day, day=timestamp.month)
+    except ValueError:
+        return pd.NaT
+
+
+def clean_date(value: object, expected_months: set[int] | None = None) -> pd.Timestamp | pd.NaT:
+    expected_months = expected_months or set()
     if pd.isna(value) or value == "":
         return pd.NaT
     if isinstance(value, pd.Timestamp):
-        return value
-    if isinstance(value, (int, float)):
-        return pd.to_datetime(value, unit="D", origin="1899-12-30", errors="coerce")
-    return pd.to_datetime(value, errors="coerce", dayfirst=True)
+        parsed = value
+    elif hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+        parsed = pd.Timestamp(value)
+    elif isinstance(value, (int, float)):
+        parsed = pd.to_datetime(value, unit="D", origin="1899-12-30", errors="coerce")
+    else:
+        text = str(value).strip()
+        match = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$", text)
+        if match:
+            first, second, year = [int(part) for part in match.groups()]
+            year = 2000 + year if year < 100 else year
+            candidates = []
+            for month, day in [(first, second), (second, first)]:
+                try:
+                    candidates.append(pd.Timestamp(year=year, month=month, day=day))
+                except ValueError:
+                    continue
+            expected = [candidate for candidate in candidates if candidate.month in expected_months]
+            if expected:
+                return expected[0]
+        parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
+
+    if pd.isna(parsed):
+        return pd.NaT
+    if expected_months and parsed.month not in expected_months:
+        swapped = _swap_month_day(parsed)
+        if not pd.isna(swapped) and swapped.month in expected_months:
+            return swapped
+    return parsed
 
 
 def read_excel_sheets(file: BytesIO) -> dict[str, pd.DataFrame]:
@@ -215,6 +263,7 @@ def load_sales_data(file: BytesIO) -> tuple[pd.DataFrame, list[str]]:
     messages: list[str] = []
     sheets = read_excel_sheets(file)
     candidates = []
+    expected_months = _infer_expected_months_from_name(getattr(file, "name", ""))
 
     preferred = ["RESUMEN", "RESUMEN 2", "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO"]
     for name, raw_df in sheets.items():
@@ -240,7 +289,7 @@ def load_sales_data(file: BytesIO) -> tuple[pd.DataFrame, list[str]]:
     for column in NUMERIC_SALES_COLUMNS:
         df[column] = df[column].map(clean_money)
 
-    df["FECHA"] = df["FECHA"].map(clean_date)
+    df["FECHA"] = df["FECHA"].map(lambda value: clean_date(value, expected_months))
     df = df.dropna(subset=["FECHA"])
     if df.empty:
         raise ValueError("El archivo de ventas no tiene fechas válidas para generar el informe.")
