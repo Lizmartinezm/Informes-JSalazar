@@ -16,7 +16,7 @@ from utils.data_cleaning import MONTHS_ES, load_expenses_data, load_sales_data, 
 from utils.report_generator import (
     automatic_interpretation,
     build_excel_report,
-    build_pdf_report_placeholder,
+    build_pdf_report,
     format_cop,
     format_percent,
 )
@@ -374,6 +374,20 @@ excel_bytes = build_excel_report(
     expenses_filtered,
     operating,
 )
+pdf_bytes = build_pdf_report(
+    executive,
+    monthly_display,
+    payments_display,
+    sellers_display,
+    clients_display,
+    money_columns(tips, ["Propinas"]),
+    money_columns(
+        expenses_filtered.rename(columns={"MES": "Mes", "GASTOS": "Gastos"}).drop(columns=["NUMERO_MES"], errors="ignore"),
+        ["Gastos"],
+    ),
+    operating_display,
+    interpretation,
+)
 
 st.markdown("<h3 class='section-title'>Descargas</h3>", unsafe_allow_html=True)
 download_col1, download_col2 = st.columns(2)
@@ -385,7 +399,9 @@ with download_col1:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 with download_col2:
-    pdf_bytes = build_pdf_report_placeholder()
-    st.download_button("Descargar informe en PDF", data=pdf_bytes or b"", file_name="informe_restaurante_sazon.pdf", disabled=pdf_bytes is None)
-    if pdf_bytes is None:
-        st.caption("La generación PDF queda preparada para una siguiente versión.")
+    st.download_button(
+        "Descargar informe en PDF",
+        data=pdf_bytes,
+        file_name="informe_restaurante_sazon.pdf",
+        mime="application/pdf",
+    )
