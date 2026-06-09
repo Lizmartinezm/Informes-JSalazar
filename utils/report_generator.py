@@ -262,6 +262,10 @@ def _standardize_pdf_columns(df: pd.DataFrame) -> pd.DataFrame:
             rename[column] = "Numero de compras"
         elif "ltima fecha" in lowered or "ultima fecha" in lowered:
             rename[column] = "Ultima fecha de compra"
+        elif "cortes" in lowered and "total" in lowered:
+            rename[column] = "Total cortesías"
+        elif "cortes" in lowered:
+            rename[column] = "Cortesías"
     return df.rename(columns=rename)
 
 
