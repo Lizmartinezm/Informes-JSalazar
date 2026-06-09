@@ -70,7 +70,14 @@ def build_dashboard_tables(sales: pd.DataFrame, expenses: pd.DataFrame, expense_
     monthly_sales = (
         sales.groupby(["NUMERO_MES", "MES"], as_index=False)
         .agg(
-            Ventas=("VALOR FACTURA", "sum"),
+            **{
+                "Ventas brutas": ("VENTAS_BRUTAS", "sum"),
+                "Cortesías": ("CORTESIAS_VALOR", "sum"),
+                "Ventas netas": ("VENTAS_NETAS", "sum"),
+                "Ventas": ("VENTAS_NETAS", "sum"),
+                "Recaudo real": ("RECAUDO_REAL", "sum"),
+                "Diferencia de control": ("DIFERENCIA_CONTROL", "sum"),
+            },
             **{
                 "Valor neto recibido": ("VALOR NETO", "sum"),
                 "Propinas": ("PROPINA", "sum"),
@@ -89,10 +96,9 @@ def build_dashboard_tables(sales: pd.DataFrame, expenses: pd.DataFrame, expense_
 
     payment_values = {
         "Efectivo": sales["EFECTIVO"].sum(),
-        "Tarjeta": sales["TARJETA"].sum(),
         "Transferencia": sales["TRANSFERENCIA"].sum(),
-        "Crédito": sales["CREDITO"].sum(),
-        "Cortesía": sales["CORTESIA"].sum(),
+        "Tarjeta": sales["TARJETA"].sum(),
+        "Cortesías / descuentos otorgados": sales["CORTESIAS_VALOR"].sum(),
     }
     payments = pd.DataFrame({"Forma de pago": payment_values.keys(), "Valor": payment_values.values()})
     payment_total = payments["Valor"].sum()
@@ -106,6 +112,7 @@ def build_dashboard_tables(sales: pd.DataFrame, expenses: pd.DataFrame, expense_
                 "Total ventas": ("VALOR FACTURA", "sum"),
                 "Total valor neto": ("VALOR NETO", "sum"),
                 "Total propinas": ("PROPINA", "sum"),
+                "Total cortesías": ("CORTESIAS_VALOR", "sum"),
                 "Número de facturas": ("NUMERO FACTURA", "nunique"),
             }
         )
@@ -216,14 +223,29 @@ if sales_filtered.empty:
     st.warning("No hay ventas para los filtros seleccionados.")
     st.stop()
 
+sales_filtered = sales_filtered.copy()
+sales_filtered["VENTAS_BRUTAS"] = sales_filtered["SUBTOTAL"]
+if sales_filtered["VENTAS_BRUTAS"].sum() == 0:
+    sales_filtered["VENTAS_BRUTAS"] = sales_filtered["TOTAL"]
+if sales_filtered["VENTAS_BRUTAS"].sum() == 0:
+    sales_filtered["VENTAS_BRUTAS"] = sales_filtered["VALOR FACTURA"] + sales_filtered["CORTESIAS_VALOR"]
+sales_filtered["VENTAS_NETAS"] = sales_filtered["VENTAS_BRUTAS"] - sales_filtered["CORTESIAS_VALOR"]
+sales_filtered["RECAUDO_REAL"] = sales_filtered["EFECTIVO"] + sales_filtered["TARJETA"] + sales_filtered["TRANSFERENCIA"]
+sales_filtered["DIFERENCIA_CONTROL"] = sales_filtered["VENTAS_NETAS"] + sales_filtered["PROPINA"] - sales_filtered["RECAUDO_REAL"]
+
 expenses_filtered = filtered_expenses(expenses_df, sales_filtered)
 monthly, payments, sellers, clients, tips, tips_seller, provider_summary, operating = build_dashboard_tables(
     sales_filtered, expenses_filtered, expense_details_df
 )
 
-sales_total = sales_filtered["VALOR FACTURA"].sum()
+gross_sales_total = sales_filtered["VENTAS_BRUTAS"].sum()
+courtesy_total = sales_filtered["CORTESIAS_VALOR"].sum()
+sales_total = sales_filtered["VENTAS_NETAS"].sum()
 net_total = sales_filtered["VALOR NETO"].sum()
 tips_total = sales_filtered["PROPINA"].sum()
+real_collected_total = sales_filtered["RECAUDO_REAL"].sum()
+control_difference_total = sales_filtered["DIFERENCIA_CONTROL"].sum()
+courtesy_pct = courtesy_total / gross_sales_total if gross_sales_total else 0
 expenses_total = expenses_filtered["GASTOS"].sum() if not expenses_filtered.empty else 0
 profit_total = sales_total - expenses_total
 margin_total = profit_total / sales_total if sales_total else 0
@@ -231,16 +253,20 @@ invoice_count = sales_filtered["NUMERO FACTURA"].nunique()
 avg_ticket = sales_total / invoice_count if invoice_count else 0
 top_sales_month = monthly.sort_values("Ventas", ascending=False)["Mes"].iloc[0] if not monthly.empty else "Sin datos"
 top_expense_month = monthly.sort_values("Gastos", ascending=False)["Mes"].iloc[0] if not monthly.empty and monthly["Gastos"].sum() else "Sin datos"
-top_payment = payments.iloc[0]["Forma de pago"] if not payments.empty and payments["Valor"].sum() else "Sin datos"
-top_payment_share = payments.iloc[0]["Participación %"] if not payments.empty and payments["Valor"].sum() else 0
+payment_recaudo = payments[~payments["Forma de pago"].str.contains("Cortesías", case=False, na=False)]
+top_payment = payment_recaudo.iloc[0]["Forma de pago"] if not payment_recaudo.empty and payment_recaudo["Valor"].sum() else "Sin datos"
+top_payment_share = payment_recaudo.iloc[0]["Valor"] / payment_recaudo["Valor"].sum() if not payment_recaudo.empty and payment_recaudo["Valor"].sum() else 0
 top_seller = sellers.iloc[0]["Vendedor"] if not sellers.empty else "Sin datos"
 
 kpi_rows = [
-    ("Ventas acumuladas", format_cop(sales_total)),
+    ("Ventas brutas", format_cop(gross_sales_total)),
+    ("Cortesías otorgadas", format_cop(courtesy_total)),
+    ("Ventas netas", format_cop(sales_total)),
+    ("Recaudo real", format_cop(real_collected_total)),
+    ("% cortesías sobre ventas", format_percent(courtesy_pct)),
     ("Gastos acumulados", format_cop(expenses_total)),
     ("Utilidad estimada acumulada", format_cop(profit_total)),
     ("Margen estimado acumulado", format_percent(margin_total)),
-    ("Valor neto recibido acumulado", format_cop(net_total)),
     ("Total propinas", format_cop(tips_total)),
     ("Número de facturas", f"{invoice_count:,.0f}".replace(",", ".")),
     ("Ticket promedio", format_cop(avg_ticket)),
@@ -257,7 +283,22 @@ for i in range(0, len(kpi_rows), 4):
 
 st.markdown("<h3 class='section-title'>Informe mensual</h3>", unsafe_allow_html=True)
 monthly_display = percent_columns(
-    money_columns(monthly.drop(columns=["NUMERO_MES"], errors="ignore"), ["Ventas", "Valor neto recibido", "Propinas", "Gastos", "Utilidad estimada", "Ticket promedio"]),
+    money_columns(
+        monthly.drop(columns=["NUMERO_MES"], errors="ignore"),
+        [
+            "Ventas brutas",
+            "Cortesías",
+            "Ventas netas",
+            "Ventas",
+            "Recaudo real",
+            "Diferencia de control",
+            "Valor neto recibido",
+            "Propinas",
+            "Gastos",
+            "Utilidad estimada",
+            "Ticket promedio",
+        ],
+    ),
     ["Margen estimado"],
 )
 st.dataframe(monthly_display, use_container_width=True, hide_index=True)
@@ -276,6 +317,12 @@ accumulated = pd.DataFrame(
     {
         "Indicador": [
             "Total ventas acumuladas",
+            "Ventas brutas",
+            "Cortesías otorgadas",
+            "Ventas netas",
+            "Recaudo real",
+            "% cortesías sobre ventas",
+            "Diferencia de control",
             "Total gastos acumulados",
             "Utilidad estimada acumulada",
             "Margen estimado acumulado",
@@ -284,10 +331,15 @@ accumulated = pd.DataFrame(
             "Total recaudo en tarjeta",
             "Total recaudo en transferencia",
             "Total crédito",
-            "Total cortesías",
         ],
         "Valor": [
             format_cop(sales_total),
+            format_cop(gross_sales_total),
+            format_cop(courtesy_total),
+            format_cop(sales_total),
+            format_cop(real_collected_total),
+            format_percent(courtesy_pct),
+            format_cop(control_difference_total),
             format_cop(expenses_total),
             format_cop(profit_total),
             format_percent(margin_total),
@@ -296,7 +348,6 @@ accumulated = pd.DataFrame(
             format_cop(sales_filtered["TARJETA"].sum()),
             format_cop(sales_filtered["TRANSFERENCIA"].sum()),
             format_cop(sales_filtered["CREDITO"].sum()),
-            format_cop(sales_filtered["CORTESIA"].sum()),
         ],
     }
 )
@@ -314,20 +365,24 @@ interpretation = automatic_interpretation(
 )
 st.success(interpretation)
 
-st.markdown("<h3 class='section-title'>Análisis de formas de pago</h3>", unsafe_allow_html=True)
+st.markdown("<h3 class='section-title'>Recaudo y ventas no cobradas</h3>", unsafe_allow_html=True)
 pay_col1, pay_col2 = st.columns([1, 1])
 with pay_col1:
     st.plotly_chart(payment_distribution(payments) if payments["Valor"].sum() else empty_chart(), use_container_width=True)
 with pay_col2:
     payments_display = percent_columns(money_columns(payments, ["Valor"]), ["Participación %"])
     st.dataframe(payments_display, use_container_width=True, hide_index=True)
+    st.caption(
+        "Las cortesías corresponden a consumos registrados como venta, pero no cobrados al cliente. "
+        "Por esta razón no representan entrada de dinero, pero sí deben controlarse porque reducen el ingreso potencial del restaurante."
+    )
 
 st.markdown("<h3 class='section-title'>Ventas por vendedor</h3>", unsafe_allow_html=True)
 seller_col1, seller_col2 = st.columns([1, 1])
 with seller_col1:
     st.plotly_chart(seller_sales(sellers) if not sellers.empty else empty_chart(), use_container_width=True)
 with seller_col2:
-    sellers_display = money_columns(sellers, ["Total ventas", "Total valor neto", "Total propinas", "Ticket promedio"])
+    sellers_display = money_columns(sellers, ["Total ventas", "Total valor neto", "Total propinas", "Total cortesías", "Ticket promedio"])
     st.dataframe(sellers_display, use_container_width=True, hide_index=True)
 
 st.markdown("<h3 class='section-title'>Análisis de clientes</h3>", unsafe_allow_html=True)
