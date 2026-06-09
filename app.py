@@ -16,7 +16,7 @@ from utils.data_cleaning import MONTHS_ES, load_expenses_data, load_sales_data, 
 from utils.report_generator import (
     automatic_interpretation,
     build_excel_report,
-    build_pdf_report,
+    build_pdf_report_v2,
     format_cop,
     format_percent,
 )
@@ -452,7 +452,7 @@ excel_bytes = build_excel_report(
     expenses_filtered,
     operating,
 )
-pdf_bytes = build_pdf_report(
+pdf_bytes = build_pdf_report_v2(
     executive,
     monthly.drop(columns=["NUMERO_MES"], errors="ignore"),
     payments,
