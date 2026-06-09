@@ -235,6 +235,55 @@ class GroupedBarChart(Flowable):
         self.canv.drawString(left + 92, self.height - 12, self.second_label)
 
 
+class MultiBarChart(Flowable):
+    def __init__(
+        self,
+        labels: list[str],
+        series: list[tuple[str, list[float], colors.Color]],
+        width: float = 690,
+        height: float = 150,
+    ):
+        super().__init__()
+        self.labels = labels
+        self.series = series
+        self.width = width
+        self.height = height
+
+    def wrap(self, avail_width, avail_height):
+        self.width = min(self.width, avail_width)
+        return self.width, self.height
+
+    def draw(self):
+        if not self.labels or not self.series:
+            return
+        left = 42
+        bottom = 28
+        chart_w = self.width - left - 12
+        chart_h = self.height - bottom - 20
+        all_values = [value for _, values, _ in self.series for value in values]
+        max_value = max(all_values) if all_values else 1
+        max_value = max_value or 1
+        group_w = chart_w / len(self.labels)
+        bar_w = max(5, group_w * 0.18)
+        self.canv.setFont("Helvetica", 7)
+        for idx, label in enumerate(self.labels):
+            group_x = left + idx * group_w + group_w * 0.13
+            for s_idx, (_, values, color) in enumerate(self.series):
+                value = values[idx] if idx < len(values) else 0
+                h = chart_h * (value / max_value)
+                self.canv.setFillColor(color)
+                self.canv.rect(group_x + s_idx * (bar_w + 2), bottom, bar_w, h, stroke=0, fill=1)
+            self.canv.setFillColor(MUTED)
+            self.canv.drawCentredString(group_x + bar_w, bottom - 12, label[:8])
+        legend_x = left
+        for name, _, color in self.series:
+            self.canv.setFillColor(color)
+            self.canv.rect(legend_x, self.height - 12, 8, 8, stroke=0, fill=1)
+            self.canv.setFillColor(INK)
+            self.canv.drawString(legend_x + 12, self.height - 12, name)
+            legend_x += 120
+
+
 def _get_indicator(executive: pd.DataFrame, indicator: str, default: str = "Sin datos") -> str:
     if executive.empty:
         return default
@@ -335,6 +384,25 @@ def _seller_comment(sellers: pd.DataFrame, sales_total: float) -> str:
     )
 
 
+def _seller_control_comment(sellers: pd.DataFrame) -> str:
+    if sellers.empty:
+        return "No hay informacion suficiente para evaluar vendedores."
+    top_sales = sellers.sort_values("Total ventas", ascending=False).iloc[0]
+    top_ticket = sellers.sort_values("Ticket promedio", ascending=False).iloc[0]
+    if "Total cortesias" in sellers.columns:
+        top_courtesy = sellers.sort_values("Total cortesias", ascending=False).iloc[0]
+        courtesy_text = f" El mayor valor de cortesias lo registra {top_courtesy['Vendedor']} con {format_cop(top_courtesy['Total cortesias'])}."
+    elif "Total cortesías" in sellers.columns:
+        top_courtesy = sellers.sort_values("Total cortesías", ascending=False).iloc[0]
+        courtesy_text = f" El mayor valor de cortesias lo registra {top_courtesy['Vendedor']} con {format_cop(top_courtesy['Total cortesías'])}."
+    else:
+        courtesy_text = " No hay cortesias por vendedor para comparar."
+    return (
+        f"El vendedor con mayor venta fue {top_sales['Vendedor']} con {format_cop(top_sales['Total ventas'])}."
+        f"{courtesy_text} El mayor ticket promedio lo registra {top_ticket['Vendedor']}."
+    )
+
+
 def _client_sections(clients: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     if clients.empty:
         return pd.DataFrame(), pd.DataFrame(), "No hay informacion suficiente para evaluar clientes."
@@ -400,6 +468,40 @@ def _conclusions(monthly: pd.DataFrame, payments: pd.DataFrame, operating: pd.Da
     else:
         conclusions.append("Se recomienda seguir fortaleciendo el registro de clientes para medir frecuencia y recurrencia.")
     return conclusions
+
+
+def _manager_recommendations(
+    monthly: pd.DataFrame,
+    payments: pd.DataFrame,
+    operating: pd.DataFrame,
+    clients: pd.DataFrame,
+    gross_sales_total: float,
+    courtesy_total: float,
+    expenses_total: float,
+) -> list[str]:
+    recommendations = []
+    top_month = monthly.sort_values("Ventas brutas", ascending=False).iloc[0]["Mes"] if "Ventas brutas" in monthly.columns and not monthly.empty else "Sin datos"
+    recommendations.append(f"Las ventas brutas del periodo fueron {format_cop(gross_sales_total)}; el mejor mes fue {top_month}.")
+    if gross_sales_total and courtesy_total / gross_sales_total > 0.03:
+        recommendations.append("Las cortesias superan el 3% de las ventas brutas; defina responsables, motivos autorizados y revision semanal.")
+    else:
+        recommendations.append("Mantenga seguimiento mensual de cortesias para evitar que se vuelvan una perdida silenciosa de ingreso potencial.")
+    real_payments = payments[~payments["Forma de pago"].astype(str).str.lower().str.contains("cortesia|cortesía|descuento|cortes", regex=True)]
+    cash = real_payments.loc[real_payments["Forma de pago"].astype(str).str.lower().str.contains("efectivo"), "Valor"].sum()
+    if real_payments["Valor"].sum() and cash / real_payments["Valor"].sum() > 0.5:
+        recommendations.append("El efectivo supera el 50% del recaudo; haga arqueos diarios y conciliacion contra ventas registradas.")
+    else:
+        recommendations.append("Concilie diariamente efectivo, transferencias y tarjetas contra el cierre de ventas.")
+    if not operating.empty and (operating["Gastos"].fillna(0) == 0).any():
+        recommendations.append("Hay meses sin gastos registrados; la utilidad estimada puede estar sobreestimada.")
+    else:
+        recommendations.append(f"El impacto total de cortesias y gastos fue {format_cop(courtesy_total + expenses_total)}; revise si es consistente con la operacion.")
+    has_general = not clients.empty and clients["Cliente"].astype(str).str.upper().str.contains("CLIENTE GENERAL").any()
+    if has_general:
+        recommendations.append("Reduzca el uso de Cliente General para medir recurrencia, frecuencia y clientes de mayor valor.")
+    else:
+        recommendations.append("Use la identificacion de clientes para activar acciones de fidelizacion y seguimiento de recurrencia.")
+    return recommendations[:5]
 
 
 def build_pdf_report(
@@ -657,6 +759,180 @@ def build_pdf_report(
     return output.getvalue()
 
 
+def build_pdf_report_v2(
+    executive: pd.DataFrame,
+    monthly: pd.DataFrame,
+    payments: pd.DataFrame,
+    sellers: pd.DataFrame,
+    clients: pd.DataFrame,
+    tips: pd.DataFrame,
+    expenses: pd.DataFrame,
+    operating: pd.DataFrame,
+    interpretation: str,
+) -> bytes:
+    monthly = _standardize_pdf_columns(monthly.copy())
+    payments = _standardize_pdf_columns(payments.copy())
+    sellers = _standardize_pdf_columns(sellers.copy())
+    clients = _standardize_pdf_columns(clients.copy())
+    operating = _standardize_pdf_columns(operating.copy())
+
+    for frame, cols in [
+        (monthly, ["Ventas brutas", "Cortesías", "CortesÃ­as", "Ventas netas", "Ventas", "Gastos", "Resultado estimado", "Utilidad estimada", "Recaudo real"]),
+        (payments, ["Valor", "Participacion %"]),
+        (sellers, ["Total ventas", "Total cortesías", "Total cortesÃ­as", "Total propinas", "Numero de facturas", "Ticket promedio"]),
+        (clients, ["Numero de compras", "Total vendido", "Ticket promedio"]),
+        (operating, ["Ventas", "Gastos", "Utilidad estimada", "Margen estimado"]),
+    ]:
+        for col in cols:
+            if col in frame.columns:
+                frame[col] = frame[col].map(_as_number)
+
+    courtesy_col = "Cortesías" if "Cortesías" in monthly.columns else "CortesÃ­as" if "CortesÃ­as" in monthly.columns else None
+    seller_courtesy_col = "Total cortesías" if "Total cortesías" in sellers.columns else "Total cortesÃ­as" if "Total cortesÃ­as" in sellers.columns else None
+    gross_col = "Ventas brutas" if "Ventas brutas" in monthly.columns else "Ventas"
+    net_col = "Ventas netas" if "Ventas netas" in monthly.columns else "Ventas"
+
+    gross_sales_total = monthly[gross_col].sum() if gross_col in monthly.columns else 0
+    courtesy_total = monthly[courtesy_col].sum() if courtesy_col else 0
+    net_sales_total = monthly[net_col].sum() if net_col in monthly.columns else gross_sales_total - courtesy_total
+    expenses_total = operating["Gastos"].sum() if "Gastos" in operating.columns else 0
+    result_total = net_sales_total - expenses_total
+    impact_total = courtesy_total + expenses_total
+    courtesy_pct = courtesy_total / gross_sales_total if gross_sales_total else 0
+    impact_pct = impact_total / gross_sales_total if gross_sales_total else 0
+    period = f"{monthly.iloc[0]['Mes']} - {monthly.iloc[-1]['Mes']}" if not monthly.empty else "Sin datos"
+
+    real_payments = payments[~payments["Forma de pago"].astype(str).str.lower().str.contains("cortesia|cortesía|descuento|cortes", regex=True)].copy()
+    real_collected_total = real_payments["Valor"].sum() if "Valor" in real_payments.columns else 0
+    main_payment = "Sin datos"
+    if not real_payments.empty and real_collected_total:
+        main_payment = str(real_payments.sort_values("Valor", ascending=False).iloc[0]["Forma de pago"])
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=landscape(letter),
+        rightMargin=34,
+        leftMargin=34,
+        topMargin=34,
+        bottomMargin=30,
+        title="Informe Gerencial Restaurante Sazon",
+    )
+    base_styles = getSampleStyleSheet()
+    styles = {
+        "Title": ParagraphStyle("ReportTitleV2", parent=base_styles["Title"], fontName="Helvetica-Bold", fontSize=17, leading=20, alignment=TA_CENTER, textColor=INK),
+        "Subtitle": ParagraphStyle("ReportSubtitleV2", parent=base_styles["BodyText"], fontSize=9, leading=12, alignment=TA_CENTER, textColor=MUTED),
+        "SectionTitle": ParagraphStyle("SectionTitleV2", parent=base_styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=14, textColor=PRIMARY),
+        "Body": ParagraphStyle("ReportBodyV2", parent=base_styles["BodyText"], fontSize=8.5, leading=11.5, alignment=TA_LEFT, textColor=INK),
+        "Alert": ParagraphStyle("ReportAlertV2", parent=base_styles["BodyText"], fontSize=8.5, leading=11.5, textColor=WARNING, backColor=colors.HexColor("#FEF3C7"), borderPadding=6),
+    }
+
+    story = [
+        Paragraph("Informe Gerencial de Ventas y Gastos - Restaurante Sazon", styles["Title"]),
+        Paragraph(f"Analisis mensual y acumulado del periodo cargado | Periodo: {period} | Generado: {datetime.now().strftime('%Y-%m-%d')}", styles["Subtitle"]),
+    ]
+
+    kpis = [
+        ("Ventas brutas", format_cop(gross_sales_total)),
+        ("Cortesias/descuentos", format_cop(courtesy_total)),
+        ("Ventas netas", format_cop(net_sales_total)),
+        ("Recaudo real", format_cop(real_collected_total)),
+        ("Gastos registrados", format_cop(expenses_total)),
+        ("Resultado estimado", format_cop(result_total)),
+        ("% cortesias", format_percent(courtesy_pct)),
+        ("Pago principal", main_payment),
+    ]
+    story += _section("Pagina 1: Resumen ejecutivo", styles)
+    story.append(KPIGrid(kpis, columns=4))
+    story.append(Spacer(1, 0.08 * inch))
+    story.append(_paragraph(
+        f"Estructura del resultado: Ventas brutas {format_cop(gross_sales_total)} (-) cortesias/descuentos {format_cop(courtesy_total)} "
+        f"= ventas netas {format_cop(net_sales_total)} (-) gastos registrados {format_cop(expenses_total)} "
+        f"= resultado operativo estimado {format_cop(result_total)}. El impacto total sobre ventas brutas fue {format_cop(impact_total)} "
+        f"({format_percent(impact_pct)}). "
+        + ("Alerta: las cortesias superan el 3% de las ventas brutas; conviene revisar autorizaciones, motivos y responsables." if courtesy_pct > 0.03 else "Las cortesias se mantienen por debajo del 3% de las ventas brutas."),
+        styles,
+        "Alert" if courtesy_pct > 0.03 else "Body",
+    ))
+    story.append(PageBreak())
+
+    monthly_result = pd.DataFrame({
+        "Mes": monthly["Mes"],
+        "Ventas brutas": monthly[gross_col],
+        "Cortesias": monthly[courtesy_col] if courtesy_col else 0,
+        "Ventas netas": monthly[net_col],
+        "Gastos": operating["Gastos"].values if "Gastos" in operating.columns else 0,
+    })
+    monthly_result["Resultado estimado"] = monthly_result["Ventas netas"] - monthly_result["Gastos"]
+    monthly_result["% cortesias"] = monthly_result["Cortesias"] / monthly_result["Ventas brutas"].replace(0, pd.NA)
+    monthly_result["Variacion ventas %"] = monthly_result["Ventas brutas"].pct_change().fillna(0)
+    monthly_result = monthly_result.fillna(0)
+    monthly_display = _format_df_percent(
+        _format_df_money(monthly_result, ["Ventas brutas", "Cortesias", "Ventas netas", "Gastos", "Resultado estimado"]),
+        ["% cortesias", "Variacion ventas %"],
+    )
+    story += _section("Pagina 2: Ventas, cortesias y resultado mensual", styles)
+    story.append(_pdf_table(monthly_display, max_rows=8))
+    story.append(Spacer(1, 0.08 * inch))
+    story.append(MultiBarChart(monthly_result["Mes"].astype(str).tolist(), [
+        ("Ventas brutas", monthly_result["Ventas brutas"].tolist(), PRIMARY),
+        ("Ventas netas", monthly_result["Ventas netas"].tolist(), colors.HexColor("#2563EB")),
+        ("Cortesias", monthly_result["Cortesias"].tolist(), colors.HexColor("#D97706")),
+    ], height=140))
+    story.append(PageBreak())
+
+    recaudo_table = real_payments[["Forma de pago", "Valor"]].copy() if not real_payments.empty else pd.DataFrame(columns=["Forma de pago", "Valor"])
+    recaudo_table["Participacion recaudo %"] = recaudo_table["Valor"] / real_collected_total if real_collected_total else 0
+    recaudo_table = pd.concat([recaudo_table, pd.DataFrame({"Forma de pago": ["Total recaudo real"], "Valor": [real_collected_total], "Participacion recaudo %": [1 if real_collected_total else 0]})], ignore_index=True)
+    unpaid_table = pd.DataFrame({"Concepto": ["Ventas no cobradas: cortesias/descuentos"], "Valor": [courtesy_total], "% ventas brutas": [courtesy_pct]})
+    cash_share = real_payments.loc[real_payments["Forma de pago"].astype(str).str.lower().str.contains("efectivo"), "Valor"].sum() / real_collected_total if real_collected_total else 0
+    story += _section("Pagina 3: Recaudo y control de caja", styles)
+    story.append(_pdf_table(_format_df_percent(_format_df_money(recaudo_table, ["Valor"]), ["Participacion recaudo %"]), max_rows=6))
+    story.append(Spacer(1, 0.08 * inch))
+    story.append(_pdf_table(_format_df_percent(_format_df_money(unpaid_table, ["Valor"]), ["% ventas brutas"]), max_rows=2))
+    story.append(_paragraph(
+        "El efectivo supera el 50% del recaudo. Se recomienda arqueo diario, conciliacion de caja y validacion contra ventas registradas."
+        if cash_share > 0.5 else "Concilie diariamente efectivo, transferencias, tarjeta y credito contra el cierre de ventas.",
+        styles,
+        "Alert" if cash_share > 0.5 else "Body",
+    ))
+    story.append(PageBreak())
+
+    seller_pdf = sellers.copy()
+    if seller_courtesy_col:
+        seller_pdf["% cortesias"] = seller_pdf[seller_courtesy_col] / seller_pdf["Total ventas"].replace(0, pd.NA)
+    else:
+        seller_pdf["Cortesias"] = 0
+        seller_courtesy_col = "Cortesias"
+        seller_pdf["% cortesias"] = 0
+    seller_pdf = seller_pdf.sort_values("Total ventas", ascending=False).head(5)
+    seller_pdf = seller_pdf[["Vendedor", "Total ventas", seller_courtesy_col, "% cortesias", "Total propinas", "Numero de facturas", "Ticket promedio"]]
+    seller_pdf = seller_pdf.rename(columns={"Total ventas": "Ventas", seller_courtesy_col: "Cortesias", "Total propinas": "Propinas", "Numero de facturas": "Facturas"})
+    story += _section("Pagina 4: Vendedores", styles)
+    story.append(_pdf_table(_format_df_percent(_format_df_money(seller_pdf, ["Ventas", "Cortesias", "Propinas", "Ticket promedio"]), ["% cortesias"]), max_rows=5))
+    sellers_for_comment = sellers.rename(columns={seller_courtesy_col: "Total cortesias"}) if seller_courtesy_col in sellers.columns else sellers
+    story.append(_paragraph(_seller_control_comment(sellers_for_comment), styles))
+    story.append(PageBreak())
+
+    general, identified, client_comment = _client_sections(clients)
+    client_cols = [col for col in ["Cliente", "Numero de compras", "Total vendido", "Ticket promedio", "Ultima fecha de compra"] if col in clients.columns]
+    story += _section("Pagina 5: Clientes y recomendaciones", styles)
+    if not general.empty:
+        story.append(_paragraph("Cliente General", styles, "SectionTitle"))
+        story.append(_pdf_table(_format_df_money(general[client_cols].head(2), ["Total vendido", "Ticket promedio"]), max_rows=2))
+    story.append(_paragraph("Top 5 clientes identificados", styles, "SectionTitle"))
+    identified_pdf = _format_df_money(identified[client_cols].head(5), ["Total vendido", "Ticket promedio"]) if not identified.empty else pd.DataFrame({"Mensaje": ["No hay clientes identificados para mostrar."]})
+    story.append(_pdf_table(identified_pdf, max_rows=5))
+    story.append(_paragraph(client_comment, styles, "Alert" if not general.empty else "Body"))
+    story += _section("Recomendaciones accionables", styles)
+    for idx, rec in enumerate(_manager_recommendations(monthly_result, payments, operating, clients, gross_sales_total, courtesy_total, expenses_total), start=1):
+        story.append(_paragraph(f"{idx}. {rec}", styles))
+
+    doc.build(story)
+    output.seek(0)
+    return output.getvalue()
+
+
 def automatic_interpretation(
     sales_total: float,
     expenses_total: float,
@@ -681,5 +957,3 @@ def automatic_interpretation(
         f"La forma de pago más representativa fue {top_payment}, con una participación del {format_percent(top_payment_share)} "
         f"sobre el recaudo analizado. El vendedor con mayor participación fue {top_seller}. {recommendation}"
     )
-
-
