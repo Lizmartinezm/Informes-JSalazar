@@ -303,15 +303,16 @@ def _expense_warning(operating: pd.DataFrame) -> str:
 
 
 def _payment_comment(payments: pd.DataFrame) -> str:
-    if payments.empty or payments["Valor"].sum() == 0:
+    recaudo = payments[~payments["Forma de pago"].astype(str).str.lower().str.contains("cortesia|cortesía|descuento", regex=True)]
+    if recaudo.empty or recaudo["Valor"].sum() == 0:
         return "No hay informacion suficiente para identificar una forma de pago predominante."
-    top = payments.sort_values("Valor", ascending=False).iloc[0]
+    top = recaudo.sort_values("Valor", ascending=False).iloc[0]
     comment = (
         f"La forma de pago predominante fue {top['Forma de pago']} con {format_cop(top['Valor'])}, "
-        f"equivalente al {format_percent(top['Participacion %'])} del recaudo."
+        f"equivalente al {format_percent(top['Valor'] / recaudo['Valor'].sum() if recaudo['Valor'].sum() else 0)} del recaudo."
     )
-    cash = payments.loc[payments["Forma de pago"].astype(str).str.lower().str.contains("efectivo"), "Participacion %"]
-    if not cash.empty and cash.iloc[0] > 0.5:
+    cash_value = recaudo.loc[recaudo["Forma de pago"].astype(str).str.lower().str.contains("efectivo"), "Valor"].sum()
+    if recaudo["Valor"].sum() and cash_value / recaudo["Valor"].sum() > 0.5:
         comment += " Como el efectivo supera el 50%, se recomienda realizar arqueos diarios, conciliacion de caja y validacion contra ventas registradas."
     return comment
 
@@ -354,12 +355,30 @@ def _tips_comment(tips: pd.DataFrame, sales_total: float) -> str:
     return f"Las propinas acumuladas fueron {format_cop(total)}, equivalentes al {format_percent(total / sales_total if sales_total else 0)} de las ventas. El mes con mayores propinas fue {top['Mes']}."
 
 
+def _courtesy_comment(monthly: pd.DataFrame, gross_sales_total: float, courtesy_total: float) -> str:
+    if monthly.empty or "Cortesías" not in monthly.columns:
+        return "No se encontro informacion de cortesias o descuentos en el archivo de ventas."
+    top = monthly.sort_values("Cortesías", ascending=False).iloc[0]
+    pct = courtesy_total / gross_sales_total if gross_sales_total else 0
+    comment = (
+        f"Durante el periodo analizado se otorgaron cortesias o descuentos por {format_cop(courtesy_total)}, "
+        f"equivalentes al {format_percent(pct)} de las ventas brutas. Este valor no representa dinero recibido, "
+        "pero si ventas que el restaurante dejo de cobrar. Se recomienda hacer seguimiento mensual a las cortesias, "
+        "identificar quien las autoriza y revisar si corresponden a estrategia comercial, atencion al cliente o ajustes operativos."
+    )
+    if pct > 0.03:
+        comment += " Al superar el 3% de las ventas, conviene establecer topes, responsables de autorizacion y una revision semanal."
+    comment += f" El mes con mayor valor de cortesias fue {top['Mes']} con {format_cop(top['Cortesías'])}."
+    return comment
+
+
 def _conclusions(monthly: pd.DataFrame, payments: pd.DataFrame, operating: pd.DataFrame, clients: pd.DataFrame, sales_total: float) -> list[str]:
     top_month = monthly.sort_values("Ventas", ascending=False).iloc[0]["Mes"] if not monthly.empty else "Sin datos"
     last_change = "sin informacion suficiente"
     if len(monthly) > 1 and monthly.iloc[-2]["Ventas"]:
         last_change = format_percent((monthly.iloc[-1]["Ventas"] - monthly.iloc[-2]["Ventas"]) / monthly.iloc[-2]["Ventas"])
-    payment = payments.sort_values("Valor", ascending=False).iloc[0]["Forma de pago"] if not payments.empty and payments["Valor"].sum() else "Sin datos"
+    recaudo = payments[~payments["Forma de pago"].astype(str).str.lower().str.contains("cortesia|cortesía|descuento", regex=True)]
+    payment = recaudo.sort_values("Valor", ascending=False).iloc[0]["Forma de pago"] if not recaudo.empty and recaudo["Valor"].sum() else "Sin datos"
     zero_expense = not operating.empty and (operating["Gastos"].fillna(0) == 0).any()
     has_general = not clients.empty and clients["Cliente"].astype(str).str.upper().str.contains("CLIENTE GENERAL").any()
     conclusions = [
@@ -428,14 +447,18 @@ def build_pdf_report(
     if "Margen estimado" in monthly.columns:
         monthly["Margen estimado"] = monthly["Margen estimado"].map(_as_number)
 
-    sales_total = monthly["Ventas"].sum() if "Ventas" in monthly.columns else 0
+    sales_total = monthly["Ventas netas"].sum() if "Ventas netas" in monthly.columns else monthly["Ventas"].sum() if "Ventas" in monthly.columns else 0
+    gross_sales_total = monthly["Ventas brutas"].sum() if "Ventas brutas" in monthly.columns else sales_total
+    courtesy_total = monthly["Cortesías"].sum() if "Cortesías" in monthly.columns else 0
+    real_collected_total = monthly["Recaudo real"].sum() if "Recaudo real" in monthly.columns else payments.loc[~payments["Forma de pago"].astype(str).str.lower().str.contains("cortesia|cortesía|descuento", regex=True), "Valor"].sum()
     expenses_total = operating["Gastos"].sum() if "Gastos" in operating.columns else 0
     profit_total = sales_total - expenses_total
     invoice_count = int(monthly["Numero de facturas"].map(_as_number).sum()) if "Numero de facturas" in monthly.columns else 0
     avg_ticket = sales_total / invoice_count if invoice_count else 0
     margin_total = profit_total / sales_total if sales_total else 0
     last_month_sales = monthly.iloc[-1]["Ventas"] if not monthly.empty else 0
-    top_payment = payments.sort_values("Valor", ascending=False).iloc[0] if not payments.empty and payments["Valor"].sum() else None
+    recaudo_payments = payments[~payments["Forma de pago"].astype(str).str.lower().str.contains("cortesia|cortesía|descuento", regex=True)]
+    top_payment = recaudo_payments.sort_values("Valor", ascending=False).iloc[0] if not recaudo_payments.empty and recaudo_payments["Valor"].sum() else None
     main_payment = str(top_payment["Forma de pago"]) if top_payment is not None else "Sin datos"
     period = f"{monthly.iloc[0]['Mes']} - {monthly.iloc[-1]['Mes']}" if not monthly.empty else "Sin datos"
 
@@ -510,13 +533,14 @@ def build_pdf_report(
     ]
 
     kpis = [
-        ("Ventas acumuladas", format_cop(sales_total)),
-        ("Ventas ultimo mes", format_cop(last_month_sales)),
+        ("Ventas brutas", format_cop(gross_sales_total)),
+        ("Cortesias otorgadas", format_cop(courtesy_total)),
+        ("Ventas netas", format_cop(sales_total)),
+        ("Recaudo real", format_cop(real_collected_total)),
+        ("% cortesias", format_percent(courtesy_total / gross_sales_total if gross_sales_total else 0)),
         ("Gastos acumulados", format_cop(expenses_total)),
         ("Utilidad estimada", format_cop(profit_total)),
-        ("Margen estimado", format_percent(margin_total)),
         ("Facturas", f"{invoice_count:,.0f}".replace(",", ".")),
-        ("Ticket promedio", format_cop(avg_ticket)),
         ("Pago principal", main_payment),
     ]
     story += _section("Resumen ejecutivo", styles)
@@ -525,10 +549,10 @@ def build_pdf_report(
     low_month = monthly.sort_values("Ventas", ascending=True).iloc[0] if not monthly.empty else {"Mes": "Sin datos", "Ventas": 0}
     payment_share = top_payment["Participacion %"] if top_payment is not None and "Participacion %" in top_payment else 0
     executive_text = (
-        f"El restaurante registro ventas acumuladas por {format_cop(sales_total)} durante el periodo analizado. "
+        f"El restaurante registro ventas brutas por {format_cop(gross_sales_total)} y ventas netas por {format_cop(sales_total)} durante el periodo analizado. "
         f"El mes con mayor venta fue {top_month['Mes']} con {format_cop(top_month['Ventas'])}, mientras que el mes con menor venta fue "
         f"{low_month['Mes']} con {format_cop(low_month['Ventas'])}. La forma de pago mas utilizada fue {main_payment}, "
-        f"representando el {format_percent(payment_share)} del recaudo. La utilidad estimada fue de {format_cop(profit_total)}; "
+        f"representando el {format_percent(payment_share)} del recaudo real. La utilidad estimada fue de {format_cop(profit_total)}; "
         "sin embargo, este resultado depende de que los gastos cargados esten completos para todos los meses."
     )
     story += _section("Lectura ejecutiva", styles)
@@ -558,11 +582,12 @@ def build_pdf_report(
     story.append(PageBreak())
 
     payment_table = _format_df_percent(_format_df_money(payments[["Forma de pago", "Valor", "Participacion %"]], ["Valor"]), ["Participacion %"])
-    story += _section("Recaudo y formas de pago", styles)
+    story += _section("Recaudo y ventas no cobradas", styles)
     story.append(_pdf_table(payment_table, max_rows=8))
     story.append(Spacer(1, 0.08 * inch))
     story.append(BarChart(payments["Forma de pago"].astype(str).tolist(), payments["Valor"].tolist(), width=680, height=145, color=colors.HexColor("#2563EB")))
     story.append(_paragraph(_payment_comment(payments), styles))
+    story.append(_paragraph("Las cortesias corresponden a consumos registrados como venta, pero no cobrados al cliente. Por esta razon no representan entrada de dinero, pero si deben controlarse porque reducen el ingreso potencial del restaurante.", styles, "Alert"))
     story.append(PageBreak())
 
     seller_pdf = sellers.copy()
@@ -589,6 +614,21 @@ def build_pdf_report(
     story.append(_paragraph("Clientes identificados", styles, "SectionTitle"))
     story.append(_pdf_table(identified_pdf, max_rows=10))
     story.append(_paragraph(client_comment, styles, "Alert" if not general.empty else "Body"))
+    story.append(PageBreak())
+
+    courtesy_month = monthly[["Mes", "Cortesías"]].copy() if "Cortesías" in monthly.columns else pd.DataFrame({"Mes": [], "Cortesías": []})
+    courtesy_seller = pd.DataFrame()
+    if "Total cortesías" in sellers.columns:
+        courtesy_seller = sellers[["Vendedor", "Total cortesías"]].sort_values("Total cortesías", ascending=False).head(8).rename(columns={"Total cortesías": "Cortesías"})
+    story += _section("Analisis de cortesias", styles)
+    story.append(_paragraph(f"Total de cortesias acumuladas: {format_cop(courtesy_total)}", styles))
+    story.append(_paragraph(f"Porcentaje de cortesias sobre ventas brutas: {format_percent(courtesy_total / gross_sales_total if gross_sales_total else 0)}", styles))
+    story.append(_pdf_table(_format_df_money(courtesy_month, ["Cortesías"]), max_rows=12))
+    if not courtesy_seller.empty:
+        story.append(Spacer(1, 0.08 * inch))
+        story.append(_pdf_table(_format_df_money(courtesy_seller, ["Cortesías"]), max_rows=8))
+    courtesy_style = "Alert" if (courtesy_total / gross_sales_total if gross_sales_total else 0) > 0.03 else "Body"
+    story.append(_paragraph(_courtesy_comment(monthly, gross_sales_total, courtesy_total), styles, courtesy_style))
     story.append(PageBreak())
 
     tip_seller_col = "Vendedor" if "Vendedor" in sellers.columns else sellers.columns[0]
@@ -637,3 +677,4 @@ def automatic_interpretation(
         f"La forma de pago más representativa fue {top_payment}, con una participación del {format_percent(top_payment_share)} "
         f"sobre el recaudo analizado. El vendedor con mayor participación fue {top_seller}. {recommendation}"
     )
+
