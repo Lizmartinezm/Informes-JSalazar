@@ -101,8 +101,16 @@ def build_dashboard_tables(sales: pd.DataFrame, expenses: pd.DataFrame, expense_
         "Cortesías / descuentos otorgados": sales["CORTESIAS_VALOR"].sum(),
     }
     payments = pd.DataFrame({"Forma de pago": payment_values.keys(), "Valor": payment_values.values()})
-    payment_total = payments["Valor"].sum()
-    payments["Participación %"] = payments["Valor"] / payment_total if payment_total else 0
+    real_collected = sales["RECAUDO_REAL"].sum()
+    gross_sales = sales["VENTAS_BRUTAS"].sum()
+    payments["Participación %"] = payments.apply(
+        lambda row: row["Valor"] / gross_sales
+        if "Cortesías" in str(row["Forma de pago"]) and gross_sales
+        else row["Valor"] / real_collected
+        if real_collected
+        else 0,
+        axis=1,
+    )
     payments = payments.sort_values("Valor", ascending=False)
 
     sellers = (
@@ -384,6 +392,21 @@ with seller_col1:
 with seller_col2:
     sellers_display = money_columns(sellers, ["Total ventas", "Total valor neto", "Total propinas", "Total cortesías", "Ticket promedio"])
     st.dataframe(sellers_display, use_container_width=True, hide_index=True)
+
+st.markdown("<h3 class='section-title'>Análisis de cortesías</h3>", unsafe_allow_html=True)
+courtesy_month = monthly[["Mes", "Cortesías"]].copy()
+courtesy_seller = sellers[["Vendedor", "Total cortesías"]].copy().sort_values("Total cortesías", ascending=False)
+courtesy_col1, courtesy_col2 = st.columns([1, 1])
+with courtesy_col1:
+    st.write(f"Cortesías acumuladas: **{format_cop(courtesy_total)}**")
+    st.write(f"Porcentaje de cortesías sobre ventas brutas: **{format_percent(courtesy_pct)}**")
+    top_courtesy_month = courtesy_month.sort_values("Cortesías", ascending=False).iloc[0]["Mes"] if not courtesy_month.empty else "Sin datos"
+    st.write(f"Mes con mayor valor de cortesías: **{top_courtesy_month}**")
+    if courtesy_pct > 0.03:
+        st.warning("Las cortesías superan el 3% de las ventas brutas. Se recomienda revisar autorizaciones, motivos y responsables.")
+with courtesy_col2:
+    st.dataframe(money_columns(courtesy_month, ["Cortesías"]), use_container_width=True, hide_index=True)
+    st.dataframe(money_columns(courtesy_seller.head(10), ["Total cortesías"]), use_container_width=True, hide_index=True)
 
 st.markdown("<h3 class='section-title'>Análisis de clientes</h3>", unsafe_allow_html=True)
 clients_display = clients.head(10).copy()
