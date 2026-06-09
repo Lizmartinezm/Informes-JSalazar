@@ -59,13 +59,14 @@ SALES_ALIASES = {
     "SUBTOTAL": ["SUBTOTAL", "SUB TOTAL"],
     "IVA": ["IVA", "IMPUESTO"],
     "TOTAL": ["TOTAL", "VALOR TOTAL"],
+    "DESCUENTO": ["DES- CUENTO", "DESCUENTO", "DESCUENTOS"],
     "PROPINA": ["PROPINA", "TIP", "SERVICIO"],
     "FORMA DE PAGO": ["FORMA DE PAGO", "FORMA_PAGO", "MEDIO DE PAGO", "PAGO"],
     "TARJETA": ["TARJETA", "TARJETAS", "DATAFONO", "DATÁFONO"],
     "EFECTIVO": ["EFECTIVO", "CASH"],
     "TRANSFERENCIA": ["TRANSFERENCIA", "TRANSFE RENCIA", "TRANSFE", "TRANSFER"],
     "CREDITO": ["CREDITO", "CRÉDITO", "CARTERA"],
-    "CORTESIA": ["CORTESIA", "CORTESÍA"],
+    "CORTESIA": ["CORTESIA", "CORTESÍA", "CORTESIAS", "CORTESÍAS"],
     "PROPINA TARJETA": ["PROPINA TARJETA", "TIP TARJETA"],
     "PROPINA RESTO": ["PROPINA RESTO", "PROPINA EFECTIVO", "TIP EFECTIVO"],
     "VALOR FACTURA": ["VALOR FACTURA", "VALOR FACT", "TOTAL FACTURA", "TOTAL"],
@@ -77,12 +78,14 @@ NUMERIC_SALES_COLUMNS = [
     "SUBTOTAL",
     "IVA",
     "TOTAL",
+    "DESCUENTO",
     "PROPINA",
     "TARJETA",
     "EFECTIVO",
     "TRANSFERENCIA",
     "CREDITO",
     "CORTESIA",
+    "CORTESIAS_VALOR",
     "PROPINA TARJETA",
     "PROPINA RESTO",
     "VALOR FACTURA",
@@ -287,7 +290,8 @@ def load_sales_data(file: BytesIO) -> tuple[pd.DataFrame, list[str]]:
             df[column] = "" if column in {"FECHA", "CLIENTE", "NUMERO FACTURA", "FORMA DE PAGO", "ATENDIO", "ID CLIENTE"} else 0
 
     for column in NUMERIC_SALES_COLUMNS:
-        df[column] = df[column].map(clean_money)
+        if column in df.columns:
+            df[column] = df[column].map(clean_money)
 
     df["FECHA"] = df["FECHA"].map(lambda value: clean_date(value, expected_months))
     df = df.dropna(subset=["FECHA"])
@@ -305,6 +309,10 @@ def load_sales_data(file: BytesIO) -> tuple[pd.DataFrame, list[str]]:
         df["VALOR FACTURA"] = df["TOTAL"]
     if df["VALOR NETO"].sum() == 0:
         df["VALOR NETO"] = df["VALOR FACTURA"] - df["PROPINA"]
+
+    df["CORTESIAS_VALOR"] = df["DESCUENTO"]
+    if df["CORTESIAS_VALOR"].sum() == 0 and df["CORTESIA"].sum() > 0:
+        df["CORTESIAS_VALOR"] = df["CORTESIA"]
 
     return df.reset_index(drop=True), messages
 
@@ -413,3 +421,4 @@ def validate_excel_file(uploaded_file: object, label: str) -> str | None:
     if not uploaded_file.name.lower().endswith(".xlsx"):
         return f"El archivo de {label} debe tener extensión .xlsx."
     return None
+
