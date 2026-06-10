@@ -58,23 +58,30 @@ def render_tlg() -> None:
 
     with tab_load:
         st.subheader("Carga de balance")
-        balance_file = st.file_uploader("Subir Balance de prueba por tercero", type=["xlsx"], key="tlg_balance")
+        balance_file = st.file_uploader(
+            "Subir Balance de prueba por tercero",
+            type=["xlsx"],
+            key="tlg_balance_uploader",
+        )
         template_file = st.file_uploader(
             "Subir plantilla Estados Financieros TLG 2026 (opcional)",
             type=["xlsx"],
-            key="tlg_template",
+            key="tlg_template_uploader",
         )
         confirmed = st.checkbox("Confirmo visualmente que el archivo cargado pertenece a TLG")
 
+        if template_file is not None:
+            st.session_state["tlg_template_file"] = template_file
+
         if balance_file:
             try:
+                st.session_state["tlg_balance_file"] = balance_file
                 df, metadata = load_tlg_trial_balance(balance_file)
                 valid_company, validation_message = validate_tlg_company(metadata, confirmed)
                 st.session_state["tlg_df"] = df
                 st.session_state["tlg_metadata"] = metadata
                 st.session_state["tlg_valid_company"] = valid_company
                 st.session_state["tlg_validation_message"] = validation_message
-                st.session_state["tlg_template"] = template_file
                 if valid_company:
                     summary = build_tlg_financial_summary(df)
                     st.session_state["tlg_summary"] = summary
@@ -165,7 +172,7 @@ def render_tlg() -> None:
             st.error("El archivo cargado no parece corresponder a TLG. Por seguridad, no se actualizaran los Estados Financieros.")
         else:
             updated_excel = update_tlg_financial_statements(
-                st.session_state.get("tlg_template"),
+                st.session_state.get("tlg_template_file"),
                 summary["detail"],
                 metadata,
             )
