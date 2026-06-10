@@ -421,5 +421,3 @@ def validate_excel_file(uploaded_file: object, label: str) -> str | None:
     if not uploaded_file.name.lower().endswith(".xlsx"):
         return f"El archivo de {label} debe tener extensión .xlsx."
     return None
-
-
