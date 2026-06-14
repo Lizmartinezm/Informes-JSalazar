@@ -1,169 +1,206 @@
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
+from pathlib import Path
+from typing import BinaryIO
 
 import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
-from utils.tlg_data_cleaning import load_tlg_trial_balance
+from utils.tlg_data_cleaning import MONTHS, load_tlg_trial_balance
 from utils.tlg_financial_statements import prepare_tlg_detail
 
 
-MONTH_NUMBERS = {
-    "Enero": 1,
-    "Febrero": 2,
-    "Marzo": 3,
-    "Abril": 4,
-    "Mayo": 5,
-    "Junio": 6,
-    "Julio": 7,
-    "Agosto": 8,
-    "Septiembre": 9,
-    "Octubre": 10,
-    "Noviembre": 11,
-    "Diciembre": 12,
-}
+TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "assets"
+    / "Informes_mensualizados_template.xlsx"
+)
 
 
-def period_label(metadata: dict[str, str | None]) -> str:
-    month = metadata.get("mes") or "Periodo"
-    year = metadata.get("anio") or ""
-    return f"{month} {year}".strip()
+def _period_from_metadata(metadata: dict[str, str | None]) -> tuple[int, int]:
+    month_name = str(metadata.get("mes") or "").strip().lower()
+    year_text = str(metadata.get("anio") or "").strip()
+    month = MONTHS.get(month_name)
+    if month is None or not year_text.isdigit():
+        raise ValueError(
+            "No fue posible identificar el mes y el año del balance. "
+            "Verifica que el encabezado indique el periodo del informe."
+        )
+    return int(year_text), month
 
 
-def build_monthly_balance(detail: pd.DataFrame, label: str) -> pd.DataFrame:
-    balance = detail[detail["CLASE"].isin(["1", "2", "3"])].copy()
-    balance[label] = balance["SALDO_FINAL"]
-    return balance[["CODIGO_CUENTA", "NOMBRE_CUENTA", "CLASE", "CLASIFICACION", label]]
-
-
-def build_monthly_income_statement(detail: pd.DataFrame, label: str) -> pd.DataFrame:
-    pyg = detail[detail["CLASE"].isin(["4", "5", "6", "7"])].copy()
-    pyg[label] = pyg["MOVIMIENTO_DEBITO"] - pyg["MOVIMIENTO_CREDITO"]
-    pyg.loc[pyg["CLASE"] == "4", label] = (
-        pyg.loc[pyg["CLASE"] == "4", "MOVIMIENTO_CREDITO"]
-        - pyg.loc[pyg["CLASE"] == "4", "MOVIMIENTO_DEBITO"]
+def _account4_values(detail: pd.DataFrame) -> tuple[dict[str, float], dict[str, float]]:
+    data = detail.copy()
+    data["CUENTA_4"] = (
+        data["CODIGO_CUENTA"]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\D", "", regex=True)
+        .str[:4]
     )
-    return pyg[["CODIGO_CUENTA", "NOMBRE_CUENTA", "CLASE", "CLASIFICACION", label]]
+    data = data[data["CUENTA_4"].str.len() == 4].copy()
 
-
-def _merge_month(base: pd.DataFrame, current: pd.DataFrame, label: str) -> pd.DataFrame:
-    keys = ["CODIGO_CUENTA", "NOMBRE_CUENTA", "CLASE", "CLASIFICACION"]
-    if base.empty:
-        return current.sort_values("CODIGO_CUENTA").reset_index(drop=True)
-    base = base.copy()
-    current = current.copy()
-    for key in keys:
-        base[key] = base[key].fillna("").astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
-        current[key] = current[key].fillna("").astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
-    if label in base.columns:
-        base = base.drop(columns=[label])
-    merged = base.merge(current, on=keys, how="outer")
-    value_cols = [col for col in merged.columns if col not in keys]
-    merged[value_cols] = merged[value_cols].fillna(0)
-    return merged.sort_values("CODIGO_CUENTA").reset_index(drop=True)
-
-
-def _read_generated_previous(file) -> tuple[pd.DataFrame, pd.DataFrame] | None:
-    file.seek(0)
-    excel = pd.ExcelFile(file, engine="openpyxl")
-    if "Balance Mensual" not in excel.sheet_names or "PYG Mensual" not in excel.sheet_names:
-        return None
-    balance = pd.read_excel(file, sheet_name="Balance Mensual", dtype={"CODIGO_CUENTA": str}, engine="openpyxl")
-    file.seek(0)
-    pyg = pd.read_excel(file, sheet_name="PYG Mensual", dtype={"CODIGO_CUENTA": str}, engine="openpyxl")
+    balance = data.groupby("CUENTA_4")["SALDO_FINAL"].sum().to_dict()
+    data["VALOR_PYG"] = data["MOVIMIENTO_DEBITO"] - data["MOVIMIENTO_CREDITO"]
+    income = data["CLASE"] == "4"
+    data.loc[income, "VALOR_PYG"] = (
+        data.loc[income, "MOVIMIENTO_CREDITO"]
+        - data.loc[income, "MOVIMIENTO_DEBITO"]
+    )
+    pyg = data.groupby("CUENTA_4")["VALOR_PYG"].sum().to_dict()
     return balance, pyg
 
 
-def load_previous_accumulated(file) -> tuple[pd.DataFrame, pd.DataFrame, str]:
-    generated = _read_generated_previous(file)
-    if generated is not None:
-        return generated[0], generated[1], "Version mensualizada anterior"
-
-    file.seek(0)
-    previous_df, previous_metadata = load_tlg_trial_balance(file)
-    previous_detail = prepare_tlg_detail(previous_df)
-    label = period_label(previous_metadata)
-    return (
-        build_monthly_balance(previous_detail, label),
-        build_monthly_income_statement(previous_detail, label),
-        f"Balance acumulado usado como base: {label}",
+def _find_bce_month_column(worksheet, year: int, month: int) -> int:
+    for column in range(1, worksheet.max_column + 1):
+        value = worksheet.cell(2, column).value
+        if isinstance(value, (datetime, pd.Timestamp)):
+            if value.year == year and value.month == month:
+                return column
+    raise ValueError(
+        f"La plantilla no tiene una columna disponible para {month:02d}/{year} en la hoja BCE."
     )
+
+
+def _find_pyg_month_column(worksheet, bce_column: int, year: int, month: int) -> int:
+    bce_reference = f"BCE!{get_column_letter(bce_column)}2".upper()
+    for column in range(1, worksheet.max_column + 1):
+        value = worksheet.cell(3, column).value
+        if isinstance(value, str) and bce_reference in value.replace("$", "").upper():
+            return column
+
+    known_year_starts = {2024: 5, 2025: 18, 2026: 31}
+    if year in known_year_starts:
+        return known_year_starts[year] + month - 1
+    raise ValueError(
+        f"La plantilla no tiene una columna disponible para {month:02d}/{year} en la hoja P Y G."
+    )
+
+
+def _write_mapped_accounts(worksheet, column: int, values: dict[str, float]) -> int:
+    updated = 0
+    for row in range(1, worksheet.max_row + 1):
+        raw_code = worksheet.cell(row, 3).value
+        if raw_code is None:
+            continue
+        code = str(raw_code).replace(".0", "").strip()
+        if not code.isdigit() or len(code) != 4:
+            continue
+        worksheet.cell(row, column).value = float(values.get(code, 0.0))
+        updated += 1
+    return updated
+
+
+def _load_base_workbook(previous_file: BinaryIO | None):
+    if previous_file is not None:
+        previous_file.seek(0)
+        source = BytesIO(previous_file.read())
+        source_name = "Informe mensualizado anterior"
+    else:
+        if not TEMPLATE_PATH.exists():
+            raise FileNotFoundError(
+                "No se encontró la plantilla base de Informes mensualizados."
+            )
+        source = TEMPLATE_PATH
+        source_name = "Plantilla base"
+
+    workbook = load_workbook(source, data_only=False, keep_links=True)
+    missing = {"BCE", "P Y G"} - set(workbook.sheetnames)
+    if missing:
+        raise ValueError(
+            "El archivo acumulado no corresponde a la plantilla de informes mensualizados. "
+            "Debe contener las hojas BCE y P Y G."
+        )
+    return workbook, source_name
 
 
 def build_monthly_reports(
-    monthly_file,
-    previous_file=None,
+    monthly_files: list[BinaryIO],
+    previous_file: BinaryIO | None = None,
 ) -> dict[str, object]:
-    monthly_file.seek(0)
-    raw_df, metadata = load_tlg_trial_balance(monthly_file)
-    detail = prepare_tlg_detail(raw_df)
-    label = period_label(metadata)
-    current_balance = build_monthly_balance(detail, label)
-    current_pyg = build_monthly_income_statement(detail, label)
+    if not monthly_files:
+        raise ValueError("Debes cargar al menos un balance de prueba por tercero.")
 
-    base_balance = pd.DataFrame()
-    base_pyg = pd.DataFrame()
-    previous_message = "No se cargo una version acumulada anterior."
-    if previous_file is not None:
-        base_balance, base_pyg, previous_message = load_previous_accumulated(previous_file)
+    periods: list[dict[str, object]] = []
+    seen_periods: set[tuple[int, int]] = set()
+    companies: set[str] = set()
 
-    balance = _merge_month(base_balance, current_balance, label)
-    pyg = _merge_month(base_pyg, current_pyg, label)
+    for uploaded_file in monthly_files:
+        uploaded_file.seek(0)
+        raw_df, metadata = load_tlg_trial_balance(uploaded_file)
+        year, month = _period_from_metadata(metadata)
+        if (year, month) in seen_periods:
+            raise ValueError(
+                f"Se cargó más de un balance para {month:02d}/{year}. "
+                "Deja solamente el archivo que deseas usar para ese mes."
+            )
+        seen_periods.add((year, month))
+        company = str(metadata.get("empresa") or "").strip()
+        if company:
+            companies.add(company)
+        detail = prepare_tlg_detail(raw_df)
+        balance_values, pyg_values = _account4_values(detail)
+        periods.append(
+            {
+                "year": year,
+                "month": month,
+                "metadata": metadata,
+                "balance_values": balance_values,
+                "pyg_values": pyg_values,
+                "file_name": getattr(uploaded_file, "name", f"{month:02d}-{year}.xlsx"),
+                "accounts": int(detail["CODIGO_CUENTA"].nunique()),
+            }
+        )
 
-    income = current_pyg.loc[current_pyg["CLASE"] == "4", label].sum()
-    expenses = current_pyg.loc[current_pyg["CLASE"].isin(["5", "6", "7"]), label].sum()
-    result = income - expenses
-    assets = current_balance.loc[current_balance["CLASE"] == "1", label].sum()
-    liabilities_signed = current_balance.loc[current_balance["CLASE"] == "2", label].sum()
-    equity_signed = current_balance.loc[current_balance["CLASE"] == "3", label].sum()
-    liabilities = abs(liabilities_signed)
-    equity = abs(equity_signed)
-    balance_difference = detail["SALDO_FINAL"].sum()
+    if len(companies) > 1:
+        raise ValueError("Los balances cargados parecen pertenecer a empresas diferentes.")
 
-    summary = pd.DataFrame(
-        {
-            "Indicador": [
-                "Total activo",
-                "Total pasivo",
-                "Total patrimonio",
-                "Ingresos del mes",
-                "Costos y gastos del mes",
-                "Resultado del mes",
-                "Diferencia balance",
-            ],
-            label: [assets, liabilities, equity, income, expenses, result, balance_difference],
-        }
-    )
+    periods.sort(key=lambda item: (item["year"], item["month"]))
+    workbook, source_name = _load_base_workbook(previous_file)
+    bce = workbook["BCE"]
+    pyg = workbook["P Y G"]
 
+    summary_rows: list[dict[str, object]] = []
+    for period in periods:
+        year = int(period["year"])
+        month = int(period["month"])
+        bce_column = _find_bce_month_column(bce, year, month)
+        pyg_column = _find_pyg_month_column(pyg, bce_column, year, month)
+        bce_count = _write_mapped_accounts(
+            bce, bce_column, period["balance_values"]
+        )
+        pyg_count = _write_mapped_accounts(
+            pyg, pyg_column, period["pyg_values"]
+        )
+        summary_rows.append(
+            {
+                "Archivo": period["file_name"],
+                "Periodo": f"{month:02d}/{year}",
+                "Cuentas leídas": period["accounts"],
+                "Filas BCE actualizadas": bce_count,
+                "Filas PYG actualizadas": pyg_count,
+            }
+        )
+
+    if hasattr(workbook, "calculation"):
+        workbook.calculation.fullCalcOnLoad = True
+        workbook.calculation.forceFullCalc = True
+        workbook.calculation.calcMode = "auto"
+
+    output = BytesIO()
+    workbook.save(output)
+    last_period = periods[-1]
     return {
-        "metadata": metadata,
-        "label": label,
-        "detail": detail,
-        "balance": balance,
-        "pyg": pyg,
-        "summary": summary,
-        "previous_message": previous_message,
+        "output": output.getvalue(),
+        "periods": pd.DataFrame(summary_rows),
+        "source_name": source_name,
+        "last_period": f"{int(last_period['month']):02d}/{int(last_period['year'])}",
     }
 
 
 def export_monthly_reports(report: dict[str, object]) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        report["summary"].to_excel(writer, sheet_name="Resumen Mensual", index=False)
-        report["balance"].to_excel(writer, sheet_name="Balance Mensual", index=False)
-        report["pyg"].to_excel(writer, sheet_name="PYG Mensual", index=False)
-        report["detail"].to_excel(writer, sheet_name=f"Detalle {report['label']}"[:31], index=False)
-        pd.DataFrame([report["metadata"]]).to_excel(writer, sheet_name="Datos Empresa", index=False)
-
-        workbook = writer.book
-        money_format = workbook.add_format({"num_format": "$#,##0.00"})
-        header_format = workbook.add_format({"bold": True, "bg_color": "#0F766E", "font_color": "#FFFFFF"})
-        for sheet_name, worksheet in writer.sheets.items():
-            worksheet.freeze_panes(1, 0)
-            worksheet.autofilter(0, 0, 0, max(0, worksheet.dim_colmax))
-            worksheet.set_row(0, 22, header_format)
-            worksheet.set_column(0, 0, 18)
-            worksheet.set_column(1, 1, 34)
-            worksheet.set_column(2, 3, 18)
-            worksheet.set_column(4, max(4, worksheet.dim_colmax), 18, money_format)
-    return output.getvalue()
+    return bytes(report["output"])
