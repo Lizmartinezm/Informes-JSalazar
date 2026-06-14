@@ -6,6 +6,7 @@ import sys
 import streamlit as st
 
 from clientes.tlg import render_tlg
+from clientes.mensualizados import render_monthly_reports
 from utils.ui_components import feature_grid, section_header
 
 
@@ -41,15 +42,21 @@ def render_custom_reports() -> None:
         "Informes personalizados de clientes",
         "Selecciona el cliente que quieres analizar. Cada informe vive en su propio modulo para evitar cruces de logica.",
     )
-    client = st.radio("Cliente", ["Restaurante Sazon", "TLG"], horizontal=True)
+    client = st.radio(
+        "Tipo de informe",
+        ["Restaurante Sazon", "TLG", "Informes mensualizados"],
+        horizontal=True,
+    )
     st.divider()
     if client == "Restaurante Sazon":
         if "clientes.sazon" in sys.modules:
             importlib.reload(sys.modules["clientes.sazon"])
         else:
             importlib.import_module("clientes.sazon")
-    else:
+    elif client == "TLG":
         render_tlg()
+    else:
+        render_monthly_reports()
 
 
 def render_financial_statements() -> None:
