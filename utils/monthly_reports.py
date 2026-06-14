@@ -15,7 +15,6 @@ from utils.tlg_financial_statements import prepare_tlg_detail
 
 TEMPLATE_PATH = (
     Path(__file__).resolve().parents[1]
-    / "assets"
     / "Informes_mensualizados_template.xlsx"
 )
 
