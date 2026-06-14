@@ -15,6 +15,13 @@ from utils.tlg_data_cleaning import load_tlg_trial_balance
 from utils.ui_components import info_panel, process_steps, section_header
 
 
+def _series_value(row: pd.Series, *keys: str, default: object = "") -> object:
+    for key in keys:
+        if key in row.index:
+            return row[key]
+    return default
+
+
 def _build_pdf(report: dict[str, object]) -> bytes:
     buffer = BytesIO()
     document = SimpleDocTemplate(
@@ -38,12 +45,12 @@ def _build_pdf(report: dict[str, object]) -> bytes:
     for _, row in report["periods"].iterrows():
         table_data.append(
             [
-                str(row["Tipo"]),
-                str(row["Periodo"]),
-                str(row["Archivo"]),
-                str(int(row["Cuentas leidas"])),
-                str(int(row["Filas BCE actualizadas"])),
-                str(int(row["Filas PYG actualizadas"])),
+                str(_series_value(row, "Tipo", default="Mensual")),
+                str(_series_value(row, "Periodo", default="-")),
+                str(_series_value(row, "Archivo", default="-")),
+                str(int(_series_value(row, "Cuentas leídas", "Cuentas leidas", default=0))),
+                str(int(_series_value(row, "Filas BCE actualizadas", default=0))),
+                str(int(_series_value(row, "Filas PYG actualizadas", default=0))),
             ]
         )
     table = Table(
@@ -232,10 +239,15 @@ def render_monthly_reports() -> None:
         type="primary",
         use_container_width=True,
     )
-    st.download_button(
-        "Descargar PDF ejecutivo",
-        data=_build_pdf(report),
-        file_name="Informes_mensualizados_resumen.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-    )
+    try:
+        pdf_bytes = _build_pdf(report)
+    except Exception as exc:
+        st.warning(f"No se pudo preparar el PDF ejecutivo: {exc}")
+    else:
+        st.download_button(
+            "Descargar PDF ejecutivo",
+            data=pdf_bytes,
+            file_name="Informes_mensualizados_resumen.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
