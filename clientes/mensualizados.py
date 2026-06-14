@@ -3,46 +3,63 @@ from __future__ import annotations
 import streamlit as st
 
 from utils.monthly_reports import build_monthly_reports, export_monthly_reports
-from utils.ui_components import section_header
+from utils.ui_components import info_panel, process_steps, section_header
 
 
 def render_monthly_reports() -> None:
     section_header(
         "Informes mensualizados",
-        "Actualiza el Balance y el PYG en el formato mensualizado definido. "
-        "Puedes cargar uno o varios balances de prueba por tercero al mismo tiempo.",
+        "Actualiza Balance y PYG sobre la plantilla oficial, conservando los periodos anteriores y el formato de presentación.",
+        eyebrow="Actualización acumulativa",
+        badge="Balance + PYG",
+    )
+    process_steps(
+        [
+            "Selecciona la base acumulada",
+            "Carga uno o varios balances",
+            "Valida y descarga el informe",
+        ]
     )
 
-    has_previous = st.radio(
-        "¿Tienes una versión acumulada anterior?",
-        ["Sí", "No"],
-        horizontal=True,
-        key="monthly_has_previous",
-    )
+    left, right = st.columns([0.9, 1.1], gap="large")
+    with left:
+        st.subheader("1. Base del informe")
+        has_previous = st.radio(
+            "¿Tienes una versión acumulada anterior?",
+            ["Sí", "No"],
+            horizontal=True,
+            key="monthly_has_previous",
+        )
 
-    previous_file = None
-    if has_previous == "Sí":
-        previous_file = st.file_uploader(
-            "Subir informe mensualizado acumulado anterior",
+        previous_file = None
+        if has_previous == "Sí":
+            previous_file = st.file_uploader(
+                "Informe mensualizado anterior",
+                type=["xlsx"],
+                key="monthly_previous_uploader",
+                help="Debe contener las hojas BCE y P Y G.",
+            )
+            info_panel(
+                "Actualización controlada",
+                "Los meses existentes se conservan. Solo se reemplazan los periodos incluidos en los nuevos balances.",
+            )
+        else:
+            info_panel(
+                "Plantilla oficial incluida",
+                "La aplicación iniciará desde el formato de Informes mensualizados suministrado como referencia.",
+            )
+
+    with right:
+        st.subheader("2. Balances a procesar")
+        monthly_files = st.file_uploader(
+            "Subir uno o varios balances de prueba por tercero",
             type=["xlsx"],
-            key="monthly_previous_uploader",
-            help="Debe ser el archivo con las hojas BCE y P Y G generado o actualizado anteriormente.",
+            accept_multiple_files=True,
+            key="monthly_trial_balances_uploader",
+            help="Selecciona todos los meses que deseas crear o actualizar.",
         )
-        st.caption(
-            "Se conservarán los meses existentes y solo se reemplazarán los periodos de los balances nuevos."
-        )
-    else:
-        st.info(
-            "El informe comenzará desde la plantilla base que suministraste, conservando su formato."
-        )
-
-    monthly_files = st.file_uploader(
-        "Subir uno o varios balances de prueba por tercero",
-        type=["xlsx"],
-        accept_multiple_files=True,
-        key="monthly_trial_balances_uploader",
-        help="Puedes seleccionar varios archivos de meses diferentes en una sola carga.",
-    )
+        if monthly_files:
+            st.caption(f"{len(monthly_files)} archivo(s) listo(s) para procesar")
 
     if not monthly_files:
         st.info("Carga al menos un balance del mes que deseas crear o actualizar.")
@@ -53,9 +70,10 @@ def render_monthly_reports() -> None:
         )
         return
 
-    st.caption(f"Archivos seleccionados: {len(monthly_files)}")
+    st.divider()
+    st.subheader("3. Generación y descarga")
     if not st.button(
-        "Generar informe mensualizado",
+        "Procesar balances y generar informe",
         type="primary",
         use_container_width=True,
         key="monthly_generate_button",
@@ -72,7 +90,7 @@ def render_monthly_reports() -> None:
     st.success(
         f"Informe actualizado hasta {report['last_period']}. Base utilizada: {report['source_name']}."
     )
-    st.subheader("Periodos procesados")
+    st.subheader("Control de periodos procesados")
     st.dataframe(report["periods"], use_container_width=True, hide_index=True)
 
     st.download_button(
