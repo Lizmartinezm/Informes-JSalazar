@@ -7,16 +7,14 @@ from typing import BinaryIO
 
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from utils.tlg_data_cleaning import MONTHS, load_tlg_trial_balance
 from utils.tlg_financial_statements import prepare_tlg_detail
 
 
-TEMPLATE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "Informes_mensualizados_template.xlsx"
-)
+TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "Informes_mensualizados_template.xlsx"
 
 
 def _period_from_metadata(metadata: dict[str, str | None]) -> tuple[int, int]:
@@ -46,10 +44,7 @@ def _account4_values(detail: pd.DataFrame) -> tuple[dict[str, float], dict[str, 
     balance = data.groupby("CUENTA_4")["SALDO_FINAL"].sum().to_dict()
     data["VALOR_PYG"] = data["MOVIMIENTO_DEBITO"] - data["MOVIMIENTO_CREDITO"]
     income = data["CLASE"] == "4"
-    data.loc[income, "VALOR_PYG"] = (
-        data.loc[income, "MOVIMIENTO_CREDITO"]
-        - data.loc[income, "MOVIMIENTO_DEBITO"]
-    )
+    data.loc[income, "VALOR_PYG"] = data.loc[income, "MOVIMIENTO_CREDITO"] - data.loc[income, "MOVIMIENTO_DEBITO"]
     pyg = data.groupby("CUENTA_4")["VALOR_PYG"].sum().to_dict()
     return balance, pyg
 
@@ -57,27 +52,16 @@ def _account4_values(detail: pd.DataFrame) -> tuple[dict[str, float], dict[str, 
 def _find_bce_month_column(worksheet, year: int, month: int) -> int:
     for column in range(1, worksheet.max_column + 1):
         value = worksheet.cell(2, column).value
-        if isinstance(value, (datetime, pd.Timestamp)):
-            if value.year == year and value.month == month:
-                return column
-    raise ValueError(
-        f"La plantilla no tiene una columna disponible para {month:02d}/{year} en la hoja BCE."
-    )
-
-
-def _find_pyg_month_column(worksheet, bce_column: int, year: int, month: int) -> int:
-    bce_reference = f"BCE!{get_column_letter(bce_column)}2".upper()
-    for column in range(1, worksheet.max_column + 1):
-        value = worksheet.cell(3, column).value
-        if isinstance(value, str) and bce_reference in value.replace("$", "").upper():
+        if isinstance(value, (datetime, pd.Timestamp)) and value.year == year and value.month == month:
             return column
+    raise ValueError(f"La plantilla no tiene una columna disponible para {month:02d}/{year} en la hoja BCE.")
 
+
+def _find_pyg_month_column(year: int, month: int) -> int:
     known_year_starts = {2024: 5, 2025: 18, 2026: 31}
     if year in known_year_starts:
         return known_year_starts[year] + month - 1
-    raise ValueError(
-        f"La plantilla no tiene una columna disponible para {month:02d}/{year} en la hoja P Y G."
-    )
+    raise ValueError(f"La plantilla no tiene una columna disponible para {month:02d}/{year} en la hoja P Y G.")
 
 
 def _write_mapped_accounts(worksheet, column: int, values: dict[str, float]) -> int:
@@ -94,6 +78,68 @@ def _write_mapped_accounts(worksheet, column: int, values: dict[str, float]) -> 
     return updated
 
 
+def _clear_formula_artifacts(workbook) -> None:
+    for sheet_name in workbook.sheetnames:
+        ws = workbook[sheet_name]
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    cell.value = None
+
+
+def _build_summary_sheet(workbook, periods: list[dict[str, object]]) -> None:
+    if "Resumen" in workbook.sheetnames:
+        del workbook["Resumen"]
+    resumen = workbook.create_sheet("Resumen", 0)
+    resumen.sheet_view.showGridLines = False
+    resumen.freeze_panes = "A5"
+
+    resumen["A1"] = "Informe mensualizado"
+    resumen["A1"].font = Font(bold=True, size=16, color="0F172A")
+    resumen["A2"] = "Balance y PYG acumulados a partir de los balances de prueba cargados."
+    resumen["A2"].font = Font(color="475569")
+
+    headers = ["Periodo", "Archivo", "Cuentas leídas", "Filas BCE", "Filas PYG"]
+    for col, header in enumerate(headers, start=1):
+        cell = resumen.cell(4, col, header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="0B6B57")
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = Border(bottom=Side(style="thin", color="0B6B57"))
+
+    for row_idx, period in enumerate(periods, start=5):
+        resumen.cell(row_idx, 1, f"{int(period['month']):02d}/{int(period['year'])}")
+        resumen.cell(row_idx, 2, period["file_name"])
+        resumen.cell(row_idx, 3, period["accounts"])
+        resumen.cell(row_idx, 4, period["bce_count"])
+        resumen.cell(row_idx, 5, period["pyg_count"])
+
+    widths = {1: 12, 2: 62, 3: 16, 4: 14, 5: 14}
+    for col, width in widths.items():
+        resumen.column_dimensions[get_column_letter(col)].width = width
+
+    resumen["A10"] = "Nota"
+    resumen["A11"] = (
+        "Las hojas técnicas BCE y P Y G permanecen ocultas para evitar mostrar la plantilla de ejemplo. "
+        "Este archivo final está preparado para revisión ejecutiva."
+    )
+    resumen["A11"].alignment = Alignment(wrap_text=True)
+    resumen["A11"].font = Font(color="475569")
+    resumen.merge_cells("A11:E12")
+
+    resumen["G1"] = "Indicador"
+    resumen["H1"] = "Valor"
+    for ref in ("G1", "H1"):
+        resumen[ref].font = Font(bold=True, color="FFFFFF")
+        resumen[ref].fill = PatternFill("solid", fgColor="1F2937")
+    resumen["G2"] = "Meses procesados"
+    resumen["H2"] = len(periods)
+    resumen["G3"] = "Último periodo"
+    resumen["H3"] = f"{int(periods[-1]['month']):02d}/{int(periods[-1]['year'])}" if periods else "-"
+    resumen.column_dimensions["G"].width = 18
+    resumen.column_dimensions["H"].width = 18
+
+
 def _load_base_workbook(previous_file: BinaryIO | None):
     if previous_file is not None:
         previous_file.seek(0)
@@ -101,13 +147,11 @@ def _load_base_workbook(previous_file: BinaryIO | None):
         source_name = "Informe mensualizado anterior"
     else:
         if not TEMPLATE_PATH.exists():
-            raise FileNotFoundError(
-                "No se encontró la plantilla base de Informes mensualizados."
-            )
+            raise FileNotFoundError("No se encontró la plantilla base de Informes mensualizados.")
         source = TEMPLATE_PATH
         source_name = "Plantilla base"
 
-    workbook = load_workbook(source, data_only=False, keep_links=True)
+    workbook = load_workbook(source, data_only=True, keep_links=False)
     missing = {"BCE", "P Y G"} - set(workbook.sheetnames)
     if missing:
         raise ValueError(
@@ -168,13 +212,11 @@ def build_monthly_reports(
         year = int(period["year"])
         month = int(period["month"])
         bce_column = _find_bce_month_column(bce, year, month)
-        pyg_column = _find_pyg_month_column(pyg, bce_column, year, month)
-        bce_count = _write_mapped_accounts(
-            bce, bce_column, period["balance_values"]
-        )
-        pyg_count = _write_mapped_accounts(
-            pyg, pyg_column, period["pyg_values"]
-        )
+        pyg_column = _find_pyg_month_column(year, month)
+        bce_count = _write_mapped_accounts(bce, bce_column, period["balance_values"])
+        pyg_count = _write_mapped_accounts(pyg, pyg_column, period["pyg_values"])
+        period["bce_count"] = bce_count
+        period["pyg_count"] = pyg_count
         summary_rows.append(
             {
                 "Archivo": period["file_name"],
@@ -185,10 +227,11 @@ def build_monthly_reports(
             }
         )
 
-    if hasattr(workbook, "calculation"):
-        workbook.calculation.fullCalcOnLoad = True
-        workbook.calculation.forceFullCalc = True
-        workbook.calculation.calcMode = "auto"
+    _clear_formula_artifacts(workbook)
+    _build_summary_sheet(workbook, periods)
+    workbook["BCE"].sheet_state = "hidden"
+    workbook["P Y G"].sheet_state = "hidden"
+    workbook.active = workbook.index(workbook["Resumen"])
 
     output = BytesIO()
     workbook.save(output)
