@@ -1,9 +1,70 @@
 from __future__ import annotations
 
+from io import BytesIO
+
+import pandas as pd
 import streamlit as st
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from utils.monthly_reports import build_monthly_reports, export_monthly_reports
 from utils.ui_components import info_panel, process_steps, section_header
+
+
+def _build_pdf(report: dict[str, object]) -> bytes:
+    buffer = BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=0.55 * inch,
+        rightMargin=0.55 * inch,
+        topMargin=0.55 * inch,
+        bottomMargin=0.55 * inch,
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="Small", fontName="Helvetica", fontSize=8.2, leading=10.2))
+    story = [
+        Paragraph("Informe mensualizado", styles["Title"]),
+        Spacer(1, 0.12 * inch),
+        Paragraph("Resumen ejecutivo de los periodos procesados.", styles["BodyText"]),
+        Spacer(1, 0.18 * inch),
+    ]
+
+    table_data = [["Periodo", "Archivo", "Cuentas leídas", "BCE", "PYG"]]
+    for _, row in report["periods"].iterrows():
+        table_data.append(
+            [
+                str(row["Periodo"]),
+                str(row["Archivo"]),
+                str(int(row["Cuentas leídas"])),
+                str(int(row["Filas BCE actualizadas"])),
+                str(int(row["Filas PYG actualizadas"])),
+            ]
+        )
+    table = Table(table_data, repeatRows=1, colWidths=[0.85 * inch, 3.15 * inch, 0.9 * inch, 0.7 * inch, 0.7 * inch])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B6B57")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("LEADING", (0, 0), (-1, -1), 10),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D0D5DD")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (2, 1), (-1, -1), "CENTER"),
+            ]
+        )
+    )
+    story.append(table)
+    story.append(Spacer(1, 0.18 * inch))
+    story.append(Paragraph("Las hojas BCE y P Y G se ocultan en la descarga para entregar un archivo final sin plantillas de ejemplo ni vínculos externos.", styles["Small"]))
+    document.build(story)
+    return buffer.getvalue()
 
 
 def render_monthly_reports() -> None:
@@ -90,14 +151,25 @@ def render_monthly_reports() -> None:
     st.success(
         f"Informe actualizado hasta {report['last_period']}. Base utilizada: {report['source_name']}."
     )
-    st.subheader("Control de periodos procesados")
+    st.subheader("Vista previa ejecutiva")
     st.dataframe(report["periods"], use_container_width=True, hide_index=True)
+    st.caption("La descarga final oculta las hojas técnicas y entrega solo el resultado terminado.")
 
-    st.download_button(
-        "Descargar Informes mensualizados",
-        data=export_monthly_reports(report),
-        file_name="Informes_mensualizados_actualizado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-        use_container_width=True,
-    )
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
+        st.download_button(
+            "Descargar Excel final",
+            data=export_monthly_reports(report),
+            file_name="Informes_mensualizados_final.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+        )
+    with dl_col2:
+        st.download_button(
+            "Descargar PDF ejecutivo",
+            data=_build_pdf(report),
+            file_name="Informes_mensualizados_resumen.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
