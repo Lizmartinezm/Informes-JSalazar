@@ -99,7 +99,7 @@ def _build_summary_sheet(workbook, periods: list[dict[str, object]]) -> None:
     resumen["A2"] = "Balance y PYG acumulados a partir de los balances de prueba cargados."
     resumen["A2"].font = Font(color="475569")
 
-    headers = ["Periodo", "Archivo", "Cuentas leídas", "Filas BCE", "Filas PYG"]
+    headers = ["Tipo", "Periodo", "Archivo", "Cuentas leídas", "Filas BCE", "Filas PYG"]
     for col, header in enumerate(headers, start=1):
         cell = resumen.cell(4, col, header)
         cell.font = Font(bold=True, color="FFFFFF")
@@ -108,13 +108,14 @@ def _build_summary_sheet(workbook, periods: list[dict[str, object]]) -> None:
         cell.border = Border(bottom=Side(style="thin", color="0B6B57"))
 
     for row_idx, period in enumerate(periods, start=5):
-        resumen.cell(row_idx, 1, f"{int(period['month']):02d}/{int(period['year'])}")
-        resumen.cell(row_idx, 2, period["file_name"])
-        resumen.cell(row_idx, 3, period["accounts"])
-        resumen.cell(row_idx, 4, period["bce_count"])
-        resumen.cell(row_idx, 5, period["pyg_count"])
+        resumen.cell(row_idx, 1, period.get("kind", "Mensual"))
+        resumen.cell(row_idx, 2, period["period_label"])
+        resumen.cell(row_idx, 3, period["file_name"])
+        resumen.cell(row_idx, 4, period["accounts"])
+        resumen.cell(row_idx, 5, period["bce_count"])
+        resumen.cell(row_idx, 6, period["pyg_count"])
 
-    widths = {1: 12, 2: 62, 3: 16, 4: 14, 5: 14}
+    widths = {1: 14, 2: 14, 3: 54, 4: 16, 5: 14, 6: 14}
     for col, width in widths.items():
         resumen.column_dimensions[get_column_letter(col)].width = width
 
@@ -164,6 +165,8 @@ def _load_base_workbook(previous_file: BinaryIO | None):
 def build_monthly_reports(
     monthly_files: list[BinaryIO],
     previous_file: BinaryIO | None = None,
+    initial_balance_file: BinaryIO | None = None,
+    start_year: int | None = None,
 ) -> dict[str, object]:
     if not monthly_files:
         raise ValueError("Debes cargar al menos un balance de prueba por tercero.")
@@ -171,6 +174,28 @@ def build_monthly_reports(
     periods: list[dict[str, object]] = []
     seen_periods: set[tuple[int, int]] = set()
     companies: set[str] = set()
+
+    if initial_balance_file is not None:
+        initial_balance_file.seek(0)
+        opening_df, opening_metadata = load_tlg_trial_balance(initial_balance_file)
+        opening_detail = prepare_tlg_detail(opening_df)
+        opening_balance_values, opening_pyg_values = _account4_values(opening_detail)
+        opening_year = start_year or int(opening_metadata.get("anio") or 0) or 0
+        periods.append(
+            {
+                "year": opening_year,
+                "month": 0,
+                "metadata": opening_metadata,
+                "balance_values": opening_balance_values,
+                "pyg_values": opening_pyg_values,
+                "file_name": getattr(initial_balance_file, "name", "saldo_inicial.xlsx"),
+                "accounts": int(opening_detail["CODIGO_CUENTA"].nunique()),
+                "bce_count": 0,
+                "pyg_count": 0,
+                "period_label": f"Año base {opening_year}" if opening_year else "Año base",
+                "kind": "Base inicial",
+            }
+        )
 
     for uploaded_file in monthly_files:
         uploaded_file.seek(0)
@@ -196,6 +221,10 @@ def build_monthly_reports(
                 "pyg_values": pyg_values,
                 "file_name": getattr(uploaded_file, "name", f"{month:02d}-{year}.xlsx"),
                 "accounts": int(detail["CODIGO_CUENTA"].nunique()),
+                "bce_count": 0,
+                "pyg_count": 0,
+                "period_label": f"{month:02d}/{year}",
+                "kind": "Mensual",
             }
         )
 
@@ -209,6 +238,18 @@ def build_monthly_reports(
 
     summary_rows: list[dict[str, object]] = []
     for period in periods:
+        if period["month"] == 0:
+            summary_rows.append(
+                {
+                    "Archivo": period["file_name"],
+                    "Periodo": period["period_label"],
+                    "Tipo": period["kind"],
+                    "Cuentas leídas": period["accounts"],
+                    "Filas BCE actualizadas": 0,
+                    "Filas PYG actualizadas": 0,
+                }
+            )
+            continue
         year = int(period["year"])
         month = int(period["month"])
         bce_column = _find_bce_month_column(bce, year, month)
@@ -220,7 +261,8 @@ def build_monthly_reports(
         summary_rows.append(
             {
                 "Archivo": period["file_name"],
-                "Periodo": f"{month:02d}/{year}",
+                "Periodo": period["period_label"],
+                "Tipo": period["kind"],
                 "Cuentas leídas": period["accounts"],
                 "Filas BCE actualizadas": bce_count,
                 "Filas PYG actualizadas": pyg_count,
@@ -235,12 +277,12 @@ def build_monthly_reports(
 
     output = BytesIO()
     workbook.save(output)
-    last_period = periods[-1]
+    last_period = next((item for item in reversed(periods) if item["month"] != 0), periods[-1])
     return {
         "output": output.getvalue(),
         "periods": pd.DataFrame(summary_rows),
         "source_name": source_name,
-        "last_period": f"{int(last_period['month']):02d}/{int(last_period['year'])}",
+        "last_period": f"{int(last_period['month']):02d}/{int(last_period['year'])}" if last_period["month"] else str(last_period["period_label"]),
     }
 
 
