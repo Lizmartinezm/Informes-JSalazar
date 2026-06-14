@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from textwrap import dedent
 
 import streamlit as st
 
@@ -230,27 +231,31 @@ def inject_app_styles() -> None:
 
 def sidebar_brand() -> None:
     st.sidebar.markdown(
-        """
-        <div class="js-brand">
-            <div class="js-brand-mark">JS</div>
-            <div>
-                <div class="js-brand-name">Julio Salazar</div>
-                <div class="js-brand-role">Gestión financiera y tributaria</div>
+        dedent(
+            """
+            <div class="js-brand">
+                <div class="js-brand-mark">JS</div>
+                <div>
+                    <div class="js-brand-name">Julio Salazar</div>
+                    <div class="js-brand-role">Gestión financiera y tributaria</div>
+                </div>
             </div>
-        </div>
-        """,
+            """
+        ).strip(),
         unsafe_allow_html=True,
     )
 
 
 def top_bar(section: str) -> None:
     st.markdown(
-        f"""
-        <div class="js-topline">
-            <div class="js-topline-label">{escape(section)}</div>
-            <div class="js-status">Plataforma operativa</div>
-        </div>
-        """,
+        dedent(
+            f"""
+            <div class="js-topline">
+                <div class="js-topline-label">{escape(section)}</div>
+                <div class="js-status">Plataforma operativa</div>
+            </div>
+            """
+        ).strip(),
         unsafe_allow_html=True,
     )
 
@@ -258,16 +263,18 @@ def top_bar(section: str) -> None:
 def section_header(title: str, subtitle: str, eyebrow: str = "Centro de análisis", badge: str = "") -> None:
     badge_html = f'<div class="js-header-badge">{escape(badge)}</div>' if badge else ""
     st.markdown(
-        f"""
-        <div class="js-page-header">
-            <div>
-                <div class="js-eyebrow">{escape(eyebrow)}</div>
-                <h1 class="js-page-title">{escape(title)}</h1>
-                <div class="js-page-subtitle">{escape(subtitle)}</div>
+        dedent(
+            f"""
+            <div class="js-page-header">
+                <div>
+                    <div class="js-eyebrow">{escape(eyebrow)}</div>
+                    <h1 class="js-page-title">{escape(title)}</h1>
+                    <div class="js-page-subtitle">{escape(subtitle)}</div>
+                </div>
+                {badge_html}
             </div>
-            {badge_html}
-        </div>
-        """,
+            """
+        ).strip(),
         unsafe_allow_html=True,
     )
 
@@ -276,20 +283,22 @@ def feature_grid(items: list[tuple[str, str]]) -> None:
     cards = []
     for index, (title, copy) in enumerate(items, start=1):
         cards.append(
-            f"""
-            <div class="js-feature-card">
-                <div class="js-feature-index">{index:02d}</div>
-                <div class="js-feature-title">{escape(title)}</div>
-                <div class="js-feature-copy">{escape(copy)}</div>
-            </div>
-            """
+            dedent(
+                f"""
+                <div class="js-feature-card">
+                    <div class="js-feature-index">{index:02d}</div>
+                    <div class="js-feature-title">{escape(title)}</div>
+                    <div class="js-feature-copy">{escape(copy)}</div>
+                </div>
+                """
+            ).strip()
         )
     st.markdown(f'<div class="js-feature-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
 def process_steps(items: list[str]) -> None:
     steps = "".join(
-        f'<div class="js-step"><strong>{index:02d}</strong>{escape(item)}</div>'
+        f'<div class="js-step"><strong>{index:02d}</strong> {escape(item)}</div>'
         for index, item in enumerate(items, start=1)
     )
     st.markdown(f'<div class="js-steps">{steps}</div>', unsafe_allow_html=True)
@@ -297,11 +306,13 @@ def process_steps(items: list[str]) -> None:
 
 def info_panel(title: str, copy: str) -> None:
     st.markdown(
-        f"""
-        <div class="js-panel">
-            <div class="js-panel-title">{escape(title)}</div>
-            <div class="js-panel-copy">{escape(copy)}</div>
-        </div>
-        """,
+        dedent(
+            f"""
+            <div class="js-panel">
+                <div class="js-panel-title">{escape(title)}</div>
+                <div class="js-panel-copy">{escape(copy)}</div>
+            </div>
+            """
+        ).strip(),
         unsafe_allow_html=True,
     )
