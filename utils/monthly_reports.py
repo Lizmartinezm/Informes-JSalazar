@@ -748,6 +748,184 @@ def _expense_composition(detail: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+CLIENT_RUBRIC_LABELS = {
+    "11": "Efectivo, bancos e inversiones",
+    "12": "Inversiones",
+    "13": "Cuentas por cobrar",
+    "14": "Inventarios",
+    "15": "Propiedad, planta y equipo",
+    "16": "Intangibles y otros activos",
+    "17": "Diferidos y pagos anticipados",
+    "18": "Otros activos",
+    "19": "Valorizaciones y provisiones",
+    "21": "Obligaciones financieras",
+    "22": "Proveedores",
+    "23": "Cuentas por pagar",
+    "24": "Impuestos por pagar",
+    "25": "Obligaciones laborales",
+    "26": "Provisiones",
+    "27": "Pasivos diferidos",
+    "28": "Otros pasivos",
+    "29": "Otros instrumentos de deuda",
+    "31": "Capital social",
+    "32": "Superávit de capital",
+    "33": "Reservas",
+    "34": "Revalorización patrimonial",
+    "35": "Dividendos y participaciones",
+    "36": "Resultado del ejercicio",
+    "37": "Resultados acumulados",
+    "38": "Superávit por valorizaciones",
+    "41": "Ingresos operacionales",
+    "42": "Ingresos no operacionales",
+    "47": "Ajustes y correcciones monetarias",
+    "51": "Gastos de administración",
+    "52": "Gastos de ventas",
+    "53": "Gastos no operacionales",
+    "54": "Impuesto de renta",
+    "59": "Ganancias y pérdidas",
+    "61": "Costo de ventas",
+    "62": "Compras",
+    "71": "Costos de producción",
+    "72": "Mano de obra directa",
+    "73": "Costos indirectos",
+}
+
+
+def _client_rubric_label(group: str) -> str:
+    return CLIENT_RUBRIC_LABELS.get(group, f"Otros rubros del grupo {group}")
+
+
+def _client_period_view(
+    raw_df: pd.DataFrame,
+    period_label: str,
+    balance_values: dict[str, float],
+    pyg_values: dict[str, float],
+    result_account_code: str,
+) -> dict[str, object]:
+    summary_rows: list[dict[str, object]] = []
+    signed_balance_groups: dict[str, float] = {}
+    for code, value in balance_values.items():
+        if code[:1] not in {"1", "2", "3"}:
+            continue
+        group = code[:2]
+        signed_balance_groups[group] = signed_balance_groups.get(group, 0.0) + float(value)
+    for group, value in sorted(signed_balance_groups.items()):
+        summary_rows.append(
+            {
+                "Estado": "balance",
+                "Grupo": group,
+                "Rubro": _client_rubric_label(group),
+                "Periodo": period_label,
+                "Valor": abs(float(value)),
+            }
+        )
+
+    signed_pyg_groups: dict[str, float] = {}
+    for code, value in pyg_values.items():
+        if code[:1] not in {"4", "5", "6", "7"}:
+            continue
+        group = code[:2]
+        signed_pyg_groups[group] = signed_pyg_groups.get(group, 0.0) + float(value)
+    for group, value in sorted(signed_pyg_groups.items()):
+        summary_rows.append(
+            {
+                "Estado": "pyg",
+                "Grupo": group,
+                "Rubro": _client_rubric_label(group),
+                "Periodo": period_label,
+                "Valor": float(value),
+            }
+        )
+
+    detail = _transactional_rows(raw_df).copy()
+    detail["CUENTA_4"] = (
+        detail["CODIGO_CUENTA"]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\D", "", regex=True)
+        .str[:4]
+    )
+    detail = detail[detail["CUENTA_4"].str.len() == 4].copy()
+    detail["Grupo"] = detail["CUENTA_4"].str[:2]
+    detail["Identificación"] = (
+        detail["IDENTIFICACION"]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.strip()
+    )
+    detail["Tercero"] = detail["NOMBRE_TERCERO"].fillna("").astype(str).str.strip()
+    detail.loc[detail["Tercero"].eq(""), "Tercero"] = "Sin tercero identificado"
+
+    balance_detail = detail[detail["CLASE"].isin(["1", "2", "3"])].copy()
+    balance_detail = balance_detail[balance_detail["CUENTA_4"] != result_account_code]
+    balance_detail["Saldo"] = balance_detail["SALDO_FINAL"]
+    balance_detail = (
+        balance_detail.groupby(
+            ["Grupo", "Identificación", "Tercero"],
+            as_index=False,
+        )["Saldo"]
+        .sum()
+    )
+    for group, total in signed_balance_groups.items():
+        orientation = 1.0 if total >= 0 else -1.0
+        balance_detail.loc[
+            balance_detail["Grupo"].eq(group),
+            "Saldo",
+        ] *= orientation
+    synthetic_result = float(balance_values.get(result_account_code, 0.0))
+    if abs(synthetic_result) > 0.5:
+        balance_detail = pd.concat(
+            [
+                balance_detail,
+                pd.DataFrame(
+                    [
+                        {
+                            "Grupo": result_account_code[:2],
+                            "Identificación": "-",
+                            "Tercero": "Resultado acumulado del Estado de Resultados",
+                            "Saldo": abs(synthetic_result),
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+
+    pyg_detail = detail[detail["CLASE"].isin(["4", "5", "6", "7"])].copy()
+    pyg_detail["Saldo"] = (
+        pyg_detail["MOVIMIENTO_DEBITO"] - pyg_detail["MOVIMIENTO_CREDITO"]
+    )
+    income_rows = pyg_detail["CLASE"].eq("4")
+    pyg_detail.loc[income_rows, "Saldo"] = (
+        pyg_detail.loc[income_rows, "MOVIMIENTO_CREDITO"]
+        - pyg_detail.loc[income_rows, "MOVIMIENTO_DEBITO"]
+    )
+    pyg_detail = (
+        pyg_detail.groupby(
+            ["Grupo", "Identificación", "Tercero"],
+            as_index=False,
+        )["Saldo"]
+        .sum()
+    )
+
+    details: dict[str, pd.DataFrame] = {}
+    for statement, frame in (("balance", balance_detail), ("pyg", pyg_detail)):
+        for group, grouped in frame.groupby("Grupo"):
+            clean = grouped[grouped["Saldo"].abs() > 0.5].copy()
+            clean["Rubro"] = _client_rubric_label(str(group))
+            clean["Periodo"] = period_label
+            clean = clean.sort_values("Saldo", key=lambda series: series.abs(), ascending=False)
+            details[f"{statement}|{period_label}|{group}"] = clean[
+                ["Periodo", "Rubro", "Identificación", "Tercero", "Saldo"]
+            ].reset_index(drop=True)
+    return {
+        "summary": summary_rows,
+        "details": details,
+    }
+
+
 def _statement_preview(
     worksheet,
     values: dict[str, float],
@@ -795,6 +973,8 @@ def build_monthly_reports(
     latest_raw_df = pd.DataFrame()
     latest_detail = pd.DataFrame()
     account_additions: list[dict[str, object]] = []
+    client_summary_rows: list[dict[str, object]] = []
+    client_details: dict[str, pd.DataFrame] = {}
 
     if initial_balance_file is not None:
         initial_balance_file.seek(0)
@@ -817,6 +997,15 @@ def build_monthly_reports(
             opening_detail,
             result_account_code,
         )
+        opening_view = _client_period_view(
+            opening_df,
+            f"Saldo final {opening_year}",
+            opening_balance,
+            opening_pyg,
+            result_account_code,
+        )
+        client_summary_rows.extend(opening_view["summary"])
+        client_details.update(opening_view["details"])
         bce_base_column = _find_bce_month_column(bce, opening_year, 12)
         pyg_base_column = _find_pyg_total_column(pyg, opening_year)
         bce_count = _write_mapped_accounts(bce, bce_base_column, opening_balance)
@@ -867,6 +1056,16 @@ def build_monthly_reports(
             detail,
             result_account_code,
         )
+        period_label = f"{month:02d}/{year}"
+        period_view = _client_period_view(
+            raw_df,
+            period_label,
+            balance_values,
+            pyg_values,
+            result_account_code,
+        )
+        client_summary_rows.extend(period_view["summary"])
+        client_details.update(period_view["details"])
         latest_balance_values = balance_values
         latest_pyg_values = pyg_values
         bce_column = _find_bce_month_column(bce, year, month)
@@ -938,6 +1137,17 @@ def build_monthly_reports(
         "account_additions": pd.DataFrame(unique_additions) if unique_additions else pd.DataFrame(
             columns=["Cuenta", "Nombre", "Hoja", "Ubicación", "Motivo"]
         ),
+        "client_financial_view": {
+            "summary": pd.DataFrame(
+                client_summary_rows,
+                columns=["Estado", "Grupo", "Rubro", "Periodo", "Valor"],
+            ),
+            "details": client_details,
+            "period_order": [
+                str(row["Periodo"])
+                for row in summary_rows
+            ],
+        },
         "source_name": source_name,
         "start_year": opening_year,
         "last_period": f"{last_month:02d}/{last_year}",
