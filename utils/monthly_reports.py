@@ -9,7 +9,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from utils.tlg_data_cleaning import MONTHS, load_tlg_trial_balance
+from utils.tlg_data_cleaning import MONTHS, load_tlg_trial_balance, normalize_text
 from utils.tlg_financial_statements import prepare_tlg_detail
 
 
@@ -43,6 +43,10 @@ def _account4_values(detail: pd.DataFrame) -> tuple[dict[str, float], dict[str, 
     data = data[data["CUENTA_4"].str.len() == 4].copy()
 
     balance = data.groupby("CUENTA_4")["SALDO_FINAL"].sum().to_dict()
+    # The template carries the accumulated result in account 3605.
+    balance["3605"] = float(
+        data.loc[data["CLASE"].isin(["4", "5", "6", "7"]), "SALDO_FINAL"].sum()
+    )
     data["VALOR_PYG"] = data["MOVIMIENTO_DEBITO"] - data["MOVIMIENTO_CREDITO"]
     income = data["CLASE"] == "4"
     data.loc[income, "VALOR_PYG"] = (
@@ -194,30 +198,155 @@ def _period_metrics(
     label: str,
     kind: str,
 ) -> dict[str, object]:
-    income = (
-        detail.loc[detail["CLASE"] == "4", "MOVIMIENTO_CREDITO"].sum()
-        - detail.loc[detail["CLASE"] == "4", "MOVIMIENTO_DEBITO"].sum()
-    )
-    costs = detail.loc[
-        detail["CLASE"].isin(["5", "6", "7"]), "MOVIMIENTO_DEBITO"
-    ].sum() - detail.loc[
-        detail["CLASE"].isin(["5", "6", "7"]), "MOVIMIENTO_CREDITO"
-    ].sum()
+    codes = detail["CODIGO_CUENTA"].astype(str)
+
+    def movement(prefixes: tuple[str, ...], income_sign: bool = False) -> float:
+        selected = detail[codes.str.startswith(prefixes)]
+        if income_sign:
+            return float(
+                selected["MOVIMIENTO_CREDITO"].sum()
+                - selected["MOVIMIENTO_DEBITO"].sum()
+            )
+        return float(
+            selected["MOVIMIENTO_DEBITO"].sum()
+            - selected["MOVIMIENTO_CREDITO"].sum()
+        )
+
+    operating_income = movement(("41",), income_sign=True)
+    other_income = movement(("42", "47"), income_sign=True)
+    direct_costs = movement(("61", "62", "71", "72", "73"))
+    administration = movement(("51",))
+    selling = movement(("52",))
+    other_expenses = movement(("53", "54"))
+    income = operating_income + other_income
+    costs = direct_costs + administration + selling + other_expenses
+    gross_profit = operating_income - direct_costs
+    operating_profit = gross_profit - administration - selling
+    net_result = income - costs
+    depreciation = movement(("5160", "5165", "5260"))
     assets = detail.loc[detail["CLASE"] == "1", "SALDO_FINAL"].sum()
     liabilities = abs(detail.loc[detail["CLASE"] == "2", "SALDO_FINAL"].sum())
     equity = abs(detail.loc[detail["CLASE"] == "3", "SALDO_FINAL"].sum())
+    accumulated_result = detail.loc[
+        detail["CLASE"].isin(["4", "5", "6", "7"]), "SALDO_FINAL"
+    ].sum()
+    balance_difference = assets - (liabilities + equity - accumulated_result)
+    current_assets = detail.loc[
+        codes.str.startswith(("11", "13", "14")), "SALDO_FINAL"
+    ].sum()
+    current_liabilities = abs(
+        detail.loc[codes.str.startswith(("21", "22", "23", "24", "25", "26", "27", "28")), "SALDO_FINAL"].sum()
+    )
     return {
         "Tipo": kind,
         "Periodo": label,
         "Año": year,
         "Mes": month,
         "Ingresos": float(income),
+        "Ventas": float(operating_income),
+        "Utilidad bruta": float(gross_profit),
+        "Utilidad operacional": float(operating_profit),
         "Costos y gastos": float(costs),
-        "Resultado": float(income - costs),
+        "Resultado": float(net_result),
+        "EBITDA": float(operating_profit + depreciation),
         "Activos": float(assets),
         "Pasivos": float(liabilities),
         "Patrimonio": float(equity),
+        "Activos corrientes": float(current_assets),
+        "Pasivos corrientes": float(current_liabilities),
+        "Resultado acumulado": float(accumulated_result),
+        "Diferencia de cuadre": float(balance_difference),
     }
+
+
+def _transactional_rows(raw_df: pd.DataFrame) -> pd.DataFrame:
+    transactional = raw_df["TRANSACCIONAL"].map(normalize_text).eq("SI")
+    detail = raw_df[transactional].copy()
+    if detail.empty:
+        max_length = raw_df["CODIGO_CUENTA"].astype(str).str.len().max()
+        detail = raw_df[
+            raw_df["CODIGO_CUENTA"].astype(str).str.len().eq(max_length)
+        ].copy()
+    return detail
+
+
+def _third_party_tables(raw_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    detail = _transactional_rows(raw_df)
+    detail["CUENTA"] = detail["CODIGO_CUENTA"].astype(str)
+    detail["Tercero"] = (
+        detail["NOMBRE_TERCERO"].fillna("").astype(str).str.strip()
+    )
+    detail.loc[detail["Tercero"].eq(""), "Tercero"] = "Sin tercero"
+    detail["Identificación"] = (
+        detail["IDENTIFICACION"].fillna("").astype(str).str.replace(r"\.0$", "", regex=True)
+    )
+
+    receivables = detail[detail["CUENTA"].str.startswith("13")].copy()
+    receivables = (
+        receivables.groupby(["Identificación", "Tercero"], as_index=False)["SALDO_FINAL"]
+        .sum()
+        .rename(columns={"SALDO_FINAL": "Saldo"})
+    )
+    receivables["Saldo"] = receivables["Saldo"].clip(lower=0)
+    receivables = receivables.sort_values("Saldo", ascending=False)
+    receivables = receivables[receivables["Saldo"].abs() > 0.5]
+
+    payables = detail[
+        detail["CUENTA"].str.startswith(("21", "22", "23", "24", "25", "26", "27", "28"))
+    ].copy()
+    payables = (
+        payables.groupby(["Identificación", "Tercero"], as_index=False)["SALDO_FINAL"]
+        .sum()
+        .rename(columns={"SALDO_FINAL": "Saldo"})
+    )
+    payables["Saldo"] = payables["Saldo"].abs()
+    payables = payables.sort_values("Saldo", ascending=False)
+    payables = payables[payables["Saldo"].abs() > 0.5]
+
+    activity = detail.copy()
+    activity["Movimiento"] = (
+        activity["MOVIMIENTO_DEBITO"].abs() + activity["MOVIMIENTO_CREDITO"].abs()
+    )
+    activity = (
+        activity.groupby(["Identificación", "Tercero"], as_index=False)
+        .agg(
+            Débitos=("MOVIMIENTO_DEBITO", "sum"),
+            Créditos=("MOVIMIENTO_CREDITO", "sum"),
+            Movimiento=("Movimiento", "sum"),
+        )
+        .sort_values("Movimiento", ascending=False)
+    )
+    activity = activity[activity["Movimiento"].abs() > 0.5]
+    return {
+        "receivables": receivables.reset_index(drop=True),
+        "payables": payables.reset_index(drop=True),
+        "activity": activity.reset_index(drop=True),
+    }
+
+
+def _expense_composition(detail: pd.DataFrame) -> pd.DataFrame:
+    data = detail.copy()
+    data["Grupo"] = data["CODIGO_CUENTA"].astype(str).str[:2]
+    labels = {
+        "51": "Administración",
+        "52": "Ventas",
+        "53": "No operacionales",
+        "54": "Impuesto de renta",
+        "61": "Costo de ventas",
+        "62": "Costo de ventas",
+        "71": "Costos de producción",
+        "72": "Costos de producción",
+        "73": "Costos de producción",
+    }
+    data = data[data["Grupo"].isin(labels)].copy()
+    data["Concepto"] = data["Grupo"].map(labels)
+    data["Valor"] = data["MOVIMIENTO_DEBITO"] - data["MOVIMIENTO_CREDITO"]
+    return (
+        data.groupby("Concepto", as_index=False)["Valor"]
+        .sum()
+        .sort_values("Valor", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def _statement_preview(
@@ -262,6 +391,8 @@ def build_monthly_reports(
     monthly_periods: list[tuple[int, int]] = []
     latest_balance_values: dict[str, float] = {}
     latest_pyg_values: dict[str, float] = {}
+    latest_raw_df = pd.DataFrame()
+    latest_detail = pd.DataFrame()
 
     if initial_balance_file is not None:
         initial_balance_file.seek(0)
@@ -308,6 +439,8 @@ def build_monthly_reports(
             raise ValueError(f"Se cargó más de un archivo para {month:02d}/{year}.")
         seen_periods.add((year, month))
         detail = prepare_tlg_detail(raw_df)
+        latest_raw_df = raw_df
+        latest_detail = detail
         balance_values, pyg_values = _account4_values(detail)
         latest_balance_values = balance_values
         latest_pyg_values = pyg_values
@@ -347,6 +480,8 @@ def build_monthly_reports(
     workbook.save(output)
     last_year, last_month = monthly_periods[-1]
     metrics = pd.DataFrame(metric_rows)
+    third_parties = _third_party_tables(latest_raw_df)
+    expense_composition = _expense_composition(latest_detail)
     balance_preview = _statement_preview(
         bce,
         latest_balance_values,
@@ -363,6 +498,10 @@ def build_monthly_reports(
         "metrics": metrics,
         "balance_preview": balance_preview,
         "pyg_preview": pyg_preview,
+        "third_party_receivables": third_parties["receivables"],
+        "third_party_payables": third_parties["payables"],
+        "third_party_activity": third_parties["activity"],
+        "expense_composition": expense_composition,
         "source_name": source_name,
         "start_year": opening_year,
         "last_period": f"{last_month:02d}/{last_year}",
