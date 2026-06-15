@@ -355,6 +355,14 @@ def _render_generated_report(report: dict[str, object]) -> None:
 
         st.subheader("Control de archivos procesados")
         st.dataframe(report["periods"], width="stretch", hide_index=True)
+        account_additions = report.get("account_additions", pd.DataFrame())
+        if not account_additions.empty:
+            st.subheader("Cuentas incorporadas automáticamente")
+            st.info(
+                "Estas cuentas existían en los balances cargados, pero no en la plantilla original. "
+                "La app las ubicó en el estado financiero correspondiente."
+            )
+            st.dataframe(account_additions, width="stretch", hide_index=True)
 
         balance_tab, pyg_tab = st.tabs(["Balance General", "Estado de Resultados"])
         with balance_tab:
