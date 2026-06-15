@@ -9,6 +9,7 @@ from typing import BinaryIO
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Font, PatternFill, Protection
 from openpyxl.utils import get_column_letter
 
 from utils.tlg_data_cleaning import MONTHS, load_tlg_trial_balance, normalize_text
@@ -31,7 +32,10 @@ def _period_from_metadata(metadata: dict[str, str | None]) -> tuple[int, int]:
     return int(year_text), month
 
 
-def _account4_values(detail: pd.DataFrame) -> tuple[dict[str, float], dict[str, float]]:
+def _account4_values(
+    detail: pd.DataFrame,
+    result_account_code: str,
+) -> tuple[dict[str, float], dict[str, float]]:
     data = detail.copy()
     data["CUENTA_4"] = (
         data["CODIGO_CUENTA"]
@@ -44,8 +48,7 @@ def _account4_values(detail: pd.DataFrame) -> tuple[dict[str, float], dict[str, 
     data = data[data["CUENTA_4"].str.len() == 4].copy()
 
     balance = data.groupby("CUENTA_4")["SALDO_FINAL"].sum().to_dict()
-    # The template carries the accumulated result in account 3605.
-    balance["3605"] = float(
+    balance[result_account_code] = float(
         data.loc[data["CLASE"].isin(["4", "5", "6", "7"]), "SALDO_FINAL"].sum()
     )
     data["VALOR_PYG"] = data["MOVIMIENTO_DEBITO"] - data["MOVIMIENTO_CREDITO"]
@@ -121,6 +124,204 @@ def _account_column(worksheet) -> int:
     return column
 
 
+def _account_code(value: object) -> str:
+    code = str(value).replace(".0", "").strip() if value is not None else ""
+    return code if code.isdigit() and len(code) == 4 else ""
+
+
+def _find_result_account_code(worksheet) -> str:
+    account_column = _account_column(worksheet)
+    result_labels = (
+        "PERDIDAS Y GANANCIAS",
+        "RESULTADO DEL EJERCICIO",
+        "UTILIDAD DEL EJERCICIO",
+        "PERDIDA DEL EJERCICIO",
+    )
+    for row in range(1, worksheet.max_row + 1):
+        code = _account_code(worksheet.cell(row, account_column).value)
+        label = normalize_text(worksheet.cell(row, account_column + 1).value)
+        if code.startswith("3") and any(text in label for text in result_labels):
+            return code
+    existing_codes = {
+        _account_code(worksheet.cell(row, account_column).value)
+        for row in range(1, worksheet.max_row + 1)
+    }
+    for preferred_code in ("3605", "3610", "3705"):
+        if preferred_code in existing_codes:
+            return preferred_code
+    raise ValueError(
+        "La hoja BCE no contiene una cuenta identificable para el resultado del ejercicio."
+    )
+
+
+def _account_catalog(detail: pd.DataFrame) -> dict[str, str]:
+    data = detail.copy()
+    data["CUENTA_4"] = (
+        data["CODIGO_CUENTA"]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\D", "", regex=True)
+        .str[:4]
+    )
+    name_column = next(
+        (
+            column
+            for column in ("NOMBRE_CUENTA", "DESCRIPCION_CUENTA", "CUENTA")
+            if column in data.columns
+        ),
+        None,
+    )
+    catalog: dict[str, str] = {}
+    for _, row in data[data["CUENTA_4"].str.len() == 4].iterrows():
+        code = str(row["CUENTA_4"])
+        name = str(row.get(name_column, "") or "").strip() if name_column else ""
+        catalog.setdefault(code, name or f"Cuenta {code}")
+    return catalog
+
+
+def _is_result_source_account(code: str, name: str) -> bool:
+    label = normalize_text(name)
+    return code.startswith("3") and any(
+        text in label
+        for text in (
+            "PERDIDA DEL EJERCICIO",
+            "UTILIDAD DEL EJERCICIO",
+            "RESULTADO DEL EJERCICIO",
+            "PERDIDAS Y GANANCIAS",
+        )
+    )
+
+
+def _detail_region(worksheet, anchor_row: int) -> tuple[int, int]:
+    account_column = _account_column(worksheet)
+    start = anchor_row
+    while start > 1:
+        previous_code = _account_code(worksheet.cell(start - 1, account_column).value)
+        previous_label = worksheet.cell(start - 1, account_column + 1).value
+        if not previous_code and previous_label not in (None, ""):
+            break
+        start -= 1
+
+    end = anchor_row
+    while end < worksheet.max_row:
+        next_code = _account_code(worksheet.cell(end + 1, account_column).value)
+        next_label = worksheet.cell(end + 1, account_column + 1).value
+        if not next_code and next_label not in (None, ""):
+            break
+        end += 1
+    return start, end
+
+
+def _expand_subtotal_formula(
+    worksheet,
+    subtotal_row: int,
+    old_end: int,
+    new_end: int,
+) -> None:
+    if new_end <= old_end or subtotal_row < 1:
+        return
+    for cell in worksheet[subtotal_row]:
+        if isinstance(cell.value, str) and cell.value.startswith("="):
+            cell.value = re.sub(
+                rf"(?P<column>\$?[A-Z]+)\$?{old_end}\b",
+                rf"\g<column>{new_end}",
+                cell.value,
+            )
+
+
+def _ensure_statement_accounts(
+    worksheet,
+    catalog: dict[str, str],
+    allowed_classes: set[str],
+) -> list[dict[str, object]]:
+    account_column = _account_column(worksheet)
+    existing_rows = {
+        _account_code(worksheet.cell(row, account_column).value): row
+        for row in range(1, worksheet.max_row + 1)
+        if _account_code(worksheet.cell(row, account_column).value)
+    }
+    additions: list[dict[str, object]] = []
+
+    for code in sorted(catalog):
+        name = catalog[code]
+        if code[0] not in allowed_classes or code in existing_rows:
+            continue
+        if _is_result_source_account(code, name):
+            continue
+
+        comparable = [
+            (existing_code, row)
+            for existing_code, row in existing_rows.items()
+            if existing_code[0] == code[0]
+        ]
+        same_group = [
+            item for item in comparable if item[0][:2] == code[:2]
+        ]
+        candidates = same_group or comparable
+        if not candidates:
+            raise ValueError(
+                f"No fue posible ubicar contablemente la cuenta {code} - {name}."
+            )
+        _, anchor_row = min(
+            candidates,
+            key=lambda item: abs(int(item[0]) - int(code)),
+        )
+        region_start, region_end = _detail_region(worksheet, anchor_row)
+
+        account_rows = []
+        old_last_account_row = region_start
+        for row in range(region_start, region_end + 1):
+            existing_code = _account_code(worksheet.cell(row, account_column).value)
+            if not existing_code:
+                continue
+            old_last_account_row = max(old_last_account_row, row)
+            account_rows.append(
+                (
+                    existing_code,
+                    [worksheet.cell(row, column).value for column in range(1, worksheet.max_column + 1)],
+                )
+            )
+        new_values = [None] * worksheet.max_column
+        new_values[account_column - 1] = code
+        new_values[account_column] = name
+        account_rows.append((code, new_values))
+        account_rows.sort(key=lambda item: int(item[0]))
+
+        if len(account_rows) > region_end - region_start + 1:
+            raise ValueError(
+                f"No hay espacio disponible en la plantilla para agregar {code} - {name}."
+            )
+        for offset, row in enumerate(range(region_start, region_end + 1)):
+            values = account_rows[offset][1] if offset < len(account_rows) else [None] * worksheet.max_column
+            for column, value in enumerate(values, start=1):
+                cell = worksheet.cell(row, column)
+                if not isinstance(cell, MergedCell):
+                    cell.value = value
+
+        _expand_subtotal_formula(
+            worksheet,
+            region_start - 1,
+            old_last_account_row,
+            region_start + len(account_rows) - 1,
+        )
+        existing_rows = {
+            _account_code(worksheet.cell(row, account_column).value): row
+            for row in range(1, worksheet.max_row + 1)
+            if _account_code(worksheet.cell(row, account_column).value)
+        }
+        additions.append(
+            {
+                "Cuenta": code,
+                "Nombre": name,
+                "Hoja": worksheet.title,
+                "Ubicación": f"Fila {existing_rows[code]}",
+                "Motivo": "Cuenta presente en el balance de prueba y ausente en la plantilla.",
+            }
+        )
+    return additions
+
+
 def _write_mapped_accounts(worksheet, column: int, values: dict[str, float]) -> int:
     updated = 0
     account_column = _account_column(worksheet)
@@ -154,6 +355,13 @@ def _replace_external_formulas(workbook, cached_workbook) -> None:
                 ):
                     cached_value = cached_sheet[cell.coordinate].value
                     cell.value = cached_value if cached_value is not None else 0
+                elif isinstance(cell.value, str) and "#REF!" in cell.value:
+                    cached_value = cached_sheet[cell.coordinate].value
+                    cell.value = (
+                        cached_value
+                        if cached_value not in (None, "#REF!")
+                        else 0
+                    )
     workbook._external_links = []
 
 
@@ -168,32 +376,9 @@ def _configure_visible_periods(
 
     base_bce_column = _find_bce_month_column(bce, start_year, 12)
     pyg_base_column = _find_pyg_total_column(pyg, start_year)
-    bce_account_column = _account_column(bce)
-    pyg_account_column = _account_column(pyg)
-    visible_bce = {bce_account_column, bce_account_column + 1, base_bce_column}
-    visible_pyg = {pyg_account_column, pyg_account_column + 1, pyg_base_column}
-
-    if preserve_existing:
-        visible_bce.update(
-            column
-            for column in range(1, bce.max_column + 1)
-            if not bce.column_dimensions[get_column_letter(column)].hidden
-        )
-        visible_pyg.update(
-            column
-            for column in range(1, pyg.max_column + 1)
-            if not pyg.column_dimensions[get_column_letter(column)].hidden
-        )
-
     for year, month in monthly_periods:
         bce_column = _find_bce_month_column(bce, year, month)
-        visible_bce.add(bce_column)
-        visible_pyg.add(_find_pyg_month_column(pyg, bce_column, year, month))
-
-    for column in range(1, bce.max_column + 1):
-        bce.column_dimensions[get_column_letter(column)].hidden = column not in visible_bce
-    for column in range(1, pyg.max_column + 1):
-        pyg.column_dimensions[get_column_letter(column)].hidden = column not in visible_pyg
+        _find_pyg_month_column(pyg, bce_column, year, month)
 
     bce_header = bce.cell(2, base_bce_column)
     if not isinstance(bce_header, MergedCell):
@@ -205,6 +390,95 @@ def _configure_visible_periods(
     bce.sheet_state = "visible"
     pyg.sheet_state = "visible"
     workbook.active = workbook.index(bce)
+
+
+def _make_workbook_fully_editable(workbook) -> None:
+    if getattr(workbook, "security", None) is not None:
+        workbook.security.lockStructure = False
+        workbook.security.lockWindows = False
+
+    for worksheet in workbook.worksheets:
+        worksheet.sheet_state = "visible"
+        worksheet.protection.sheet = False
+        worksheet.protection.enable()
+        worksheet.protection.disable()
+        worksheet.freeze_panes = None
+        worksheet.print_area = None
+        worksheet.auto_filter.ref = None
+        worksheet.sheet_view.view = "normal"
+        worksheet.sheet_view.showGridLines = True
+        worksheet.sheet_properties.pageSetUpPr.fitToPage = False
+
+        for dimension in worksheet.column_dimensions.values():
+            dimension.hidden = False
+            dimension.collapsed = False
+            dimension.outlineLevel = 0
+        for dimension in worksheet.row_dimensions.values():
+            dimension.hidden = False
+            dimension.collapsed = False
+            dimension.outlineLevel = 0
+        for row in worksheet.iter_rows():
+            for cell in row:
+                if isinstance(cell, MergedCell):
+                    continue
+                cell.protection = Protection(locked=False, hidden=False)
+
+
+def _write_validation_sheet(
+    workbook,
+    additions: list[dict[str, object]],
+    metric_rows: list[dict[str, object]],
+) -> None:
+    if "Validación" in workbook.sheetnames:
+        del workbook["Validación"]
+    worksheet = workbook.create_sheet("Validación")
+    worksheet.sheet_view.showGridLines = False
+    worksheet["A1"] = "Validación contable del informe mensualizado"
+    worksheet["A1"].font = Font(bold=True, size=15, color="FFFFFF")
+    worksheet["A1"].fill = PatternFill("solid", fgColor="0B6B57")
+    worksheet.merge_cells("A1:F1")
+
+    worksheet.append([])
+    worksheet.append(
+        ["Periodo", "Diferencia de cuadre", "Estado", "Activo", "Pasivo", "Patrimonio"]
+    )
+    for metric in metric_rows:
+        difference = float(metric["Diferencia de cuadre"])
+        worksheet.append(
+            [
+                metric["Periodo"],
+                difference,
+                "CUADRA" if abs(difference) <= 1 else "REVISAR",
+                float(metric["Activos"]),
+                float(metric["Pasivos"]),
+                float(metric["Patrimonio"]),
+            ]
+        )
+
+    start_row = worksheet.max_row + 3
+    worksheet.cell(start_row, 1).value = "Cuentas agregadas automáticamente"
+    worksheet.cell(start_row, 1).font = Font(bold=True, color="FFFFFF")
+    worksheet.cell(start_row, 1).fill = PatternFill("solid", fgColor="344054")
+    headers = ["Cuenta", "Nombre", "Hoja", "Ubicación", "Motivo"]
+    for column, header in enumerate(headers, start=1):
+        worksheet.cell(start_row + 1, column).value = header
+    for addition in additions:
+        worksheet.append([addition.get(header, "") for header in headers])
+    if not additions:
+        worksheet.append(["-", "No fue necesario crear cuentas nuevas.", "-", "-", "-"])
+
+    for row in (3, start_row + 1):
+        for cell in worksheet[row]:
+            if cell.value is not None:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="1F2937")
+    for column in ("B", "D", "E", "F"):
+        for cell in worksheet[column]:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '$#,##0;[Red]($#,##0);-'
+    widths = {"A": 18, "B": 42, "C": 16, "D": 18, "E": 58, "F": 18}
+    for column, width in widths.items():
+        worksheet.column_dimensions[column].width = width
 
 
 def _load_template(previous_file: BinaryIO | None):
@@ -452,6 +726,7 @@ def build_monthly_reports(
     latest_pyg_values: dict[str, float] = {}
     latest_raw_df = pd.DataFrame()
     latest_detail = pd.DataFrame()
+    account_additions: list[dict[str, object]] = []
 
     if initial_balance_file is not None:
         initial_balance_file.seek(0)
@@ -462,7 +737,18 @@ def build_monthly_reports(
             raise ValueError(
                 f"La plantilla actual solo contiene los años {', '.join(map(str, sorted(SUPPORTED_YEARS)))}."
             )
-        opening_balance, opening_pyg = _account4_values(opening_detail)
+        opening_catalog = _account_catalog(opening_detail)
+        account_additions.extend(
+            _ensure_statement_accounts(bce, opening_catalog, {"1", "2", "3"})
+        )
+        account_additions.extend(
+            _ensure_statement_accounts(pyg, opening_catalog, {"4", "5", "6", "7"})
+        )
+        result_account_code = _find_result_account_code(bce)
+        opening_balance, opening_pyg = _account4_values(
+            opening_detail,
+            result_account_code,
+        )
         bce_base_column = _find_bce_month_column(bce, opening_year, 12)
         pyg_base_column = _find_pyg_total_column(pyg, opening_year)
         bce_count = _write_mapped_accounts(bce, bce_base_column, opening_balance)
@@ -488,6 +774,7 @@ def build_monthly_reports(
         )
     else:
         opening_year = int(start_year or _infer_start_year(workbook))
+        result_account_code = _find_result_account_code(bce)
 
     seen_periods: set[tuple[int, int]] = set()
     for uploaded_file in monthly_files:
@@ -500,7 +787,18 @@ def build_monthly_reports(
         detail = prepare_tlg_detail(raw_df)
         latest_raw_df = raw_df
         latest_detail = detail
-        balance_values, pyg_values = _account4_values(detail)
+        catalog = _account_catalog(detail)
+        account_additions.extend(
+            _ensure_statement_accounts(bce, catalog, {"1", "2", "3"})
+        )
+        account_additions.extend(
+            _ensure_statement_accounts(pyg, catalog, {"4", "5", "6", "7"})
+        )
+        result_account_code = _find_result_account_code(bce)
+        balance_values, pyg_values = _account4_values(
+            detail,
+            result_account_code,
+        )
         latest_balance_values = balance_values
         latest_pyg_values = pyg_values
         bce_column = _find_bce_month_column(bce, year, month)
@@ -529,6 +827,14 @@ def build_monthly_reports(
         monthly_periods,
         preserve_existing=previous_file is not None,
     )
+    unique_additions = list(
+        {
+            (str(item["Cuenta"]), str(item["Hoja"])): item
+            for item in account_additions
+        }.values()
+    )
+    _write_validation_sheet(workbook, unique_additions, metric_rows)
+    _make_workbook_fully_editable(workbook)
 
     if hasattr(workbook, "calculation"):
         workbook.calculation.fullCalcOnLoad = True
@@ -561,6 +867,9 @@ def build_monthly_reports(
         "third_party_payables": third_parties["payables"],
         "third_party_activity": third_parties["activity"],
         "expense_composition": expense_composition,
+        "account_additions": pd.DataFrame(unique_additions) if unique_additions else pd.DataFrame(
+            columns=["Cuenta", "Nombre", "Hoja", "Ubicación", "Motivo"]
+        ),
         "source_name": source_name,
         "start_year": opening_year,
         "last_period": f"{last_month:02d}/{last_year}",
