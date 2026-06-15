@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -193,6 +194,67 @@ def _is_result_source_account(code: str, name: str) -> bool:
     )
 
 
+def _insert_result_source_account(
+    worksheet,
+    code: str,
+    name: str,
+) -> dict[str, object]:
+    account_column = _account_column(worksheet)
+    result_code = _find_result_account_code(worksheet)
+    result_row = next(
+        row
+        for row in range(1, worksheet.max_row + 1)
+        if _account_code(worksheet.cell(row, account_column).value) == result_code
+    )
+    target_row = result_row + 1
+    while target_row <= worksheet.max_row:
+        existing_code = _account_code(worksheet.cell(target_row, account_column).value)
+        existing_label = worksheet.cell(target_row, account_column + 1).value
+        if not existing_code and existing_label in (None, ""):
+            break
+        if not existing_code and existing_label not in (None, ""):
+            raise ValueError(
+                f"No hay espacio disponible junto al resultado del ejercicio para agregar {code} - {name}."
+            )
+        target_row += 1
+
+    for column in range(1, worksheet.max_column + 1):
+        source = worksheet.cell(result_row, column)
+        target = worksheet.cell(target_row, column)
+        if isinstance(target, MergedCell):
+            continue
+        if source.has_style:
+            target._style = copy(source._style)
+        target.number_format = source.number_format
+        target.alignment = copy(source.alignment)
+        target.border = copy(source.border)
+        target.fill = copy(source.fill)
+        target.font = copy(source.font)
+        target.value = None
+    worksheet.cell(target_row, account_column).value = code
+    worksheet.cell(target_row, account_column + 1).value = name
+
+    for row in range(1, worksheet.max_row + 1):
+        label = normalize_text(worksheet.cell(row, account_column + 1).value)
+        if "PATRIMONIO NETO" not in label:
+            continue
+        for cell in worksheet[row]:
+            if not isinstance(cell.value, str) or not cell.value.startswith("="):
+                continue
+            reference = f"{get_column_letter(cell.column)}{target_row}"
+            if reference not in cell.value.replace("$", ""):
+                cell.value = f"{cell.value}-{reference}"
+        break
+
+    return {
+        "Cuenta": code,
+        "Nombre": name,
+        "Hoja": worksheet.title,
+        "Ubicación": f"Fila {target_row}",
+        "Motivo": "Saldo patrimonial del resultado del ejercicio presente en el balance de prueba.",
+    }
+
+
 def _detail_region(worksheet, anchor_row: int) -> tuple[int, int]:
     account_column = _account_column(worksheet)
     start = anchor_row
@@ -248,6 +310,12 @@ def _ensure_statement_accounts(
         if code[0] not in allowed_classes or code in existing_rows:
             continue
         if _is_result_source_account(code, name):
+            additions.append(_insert_result_source_account(worksheet, code, name))
+            existing_rows[code] = next(
+                row
+                for row in range(1, worksheet.max_row + 1)
+                if _account_code(worksheet.cell(row, account_column).value) == code
+            )
             continue
 
         comparable = [
@@ -402,12 +470,8 @@ def _make_workbook_fully_editable(workbook) -> None:
         worksheet.protection.sheet = False
         worksheet.protection.enable()
         worksheet.protection.disable()
-        worksheet.freeze_panes = None
-        worksheet.print_area = None
         worksheet.auto_filter.ref = None
         worksheet.sheet_view.view = "normal"
-        worksheet.sheet_view.showGridLines = True
-        worksheet.sheet_properties.pageSetUpPr.fitToPage = False
 
         for dimension in worksheet.column_dimensions.values():
             dimension.hidden = False
