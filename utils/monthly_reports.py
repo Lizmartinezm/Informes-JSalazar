@@ -458,6 +458,8 @@ def _configure_visible_periods(
     bce.sheet_state = "visible"
     pyg.sheet_state = "visible"
     workbook.active = workbook.index(bce)
+    for worksheet in workbook.worksheets:
+        worksheet.sheet_view.tabSelected = worksheet is bce
 
 
 def _make_workbook_fully_editable(workbook) -> None:
@@ -465,8 +467,10 @@ def _make_workbook_fully_editable(workbook) -> None:
         workbook.security.lockStructure = False
         workbook.security.lockWindows = False
 
+    active_worksheet = workbook.active
     for worksheet in workbook.worksheets:
         worksheet.sheet_state = "visible"
+        worksheet.sheet_view.tabSelected = worksheet is active_worksheet
         worksheet.protection.sheet = False
         worksheet.protection.enable()
         worksheet.protection.disable()
