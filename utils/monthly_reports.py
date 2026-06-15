@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import BinaryIO
 
 import pandas as pd
@@ -15,8 +16,7 @@ from utils.tlg_financial_statements import prepare_tlg_detail
 
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "Informes_mensualizados_template.xlsx"
-PYG_YEAR_STARTS = {2024: 5, 2025: 18, 2026: 31}
-PYG_YEAR_TOTALS = {2024: 17, 2025: 30, 2026: 43}
+SUPPORTED_YEARS = {2024, 2025, 2026}
 
 
 def _period_from_metadata(metadata: dict[str, str | None]) -> tuple[int, int]:
@@ -73,16 +73,59 @@ def _find_bce_month_column(worksheet, year: int, month: int) -> int:
     )
 
 
-def _find_pyg_month_column(year: int, month: int) -> int:
-    if year not in PYG_YEAR_STARTS:
-        raise ValueError(f"La plantilla no contiene el año {year} en la hoja P Y G.")
-    return PYG_YEAR_STARTS[year] + month - 1
+def _find_pyg_month_column(worksheet, bce_column: int, year: int, month: int) -> int:
+    bce_letter = get_column_letter(bce_column)
+    reference_pattern = re.compile(
+        rf"BCE!\$?{re.escape(bce_letter)}\$?2\b",
+        flags=re.IGNORECASE,
+    )
+    for column in range(1, worksheet.max_column + 1):
+        for row in range(1, min(worksheet.max_row, 6) + 1):
+            value = worksheet.cell(row, column).value
+            if isinstance(value, str) and reference_pattern.search(value):
+                return column
+            if isinstance(value, (datetime, pd.Timestamp)):
+                if value.year == year and value.month == month:
+                    return column
+    raise ValueError(
+        f"La plantilla no contiene el periodo {month:02d}/{year} en la hoja P Y G."
+    )
+
+
+def _find_pyg_total_column(worksheet, year: int) -> int:
+    for row in range(1, min(worksheet.max_row, 8) + 1):
+        for column in range(1, worksheet.max_column + 1):
+            value = normalize_text(worksheet.cell(row, column).value)
+            if str(year) in value and any(
+                label in value for label in ("ACUMULADO", "SALDO FINAL")
+            ):
+                return column
+    raise ValueError(f"La plantilla no contiene el acumulado del año {year} en P Y G.")
+
+
+def _account_column(worksheet) -> int:
+    candidates: dict[int, int] = {}
+    for column in range(1, min(worksheet.max_column, 8) + 1):
+        count = 0
+        for row in range(1, worksheet.max_row + 1):
+            value = worksheet.cell(row, column).value
+            code = str(value).replace(".0", "").strip() if value is not None else ""
+            if code.isdigit() and len(code) == 4:
+                count += 1
+        candidates[column] = count
+    column, count = max(candidates.items(), key=lambda item: item[1])
+    if count == 0:
+        raise ValueError(
+            f"No se encontró la columna de cuentas de 4 dígitos en la hoja {worksheet.title}."
+        )
+    return column
 
 
 def _write_mapped_accounts(worksheet, column: int, values: dict[str, float]) -> int:
     updated = 0
+    account_column = _account_column(worksheet)
     for row in range(1, worksheet.max_row + 1):
-        raw_code = worksheet.cell(row, 3).value
+        raw_code = worksheet.cell(row, account_column).value
         if raw_code is None:
             continue
         code = str(raw_code).replace(".0", "").strip()
@@ -124,34 +167,38 @@ def _configure_visible_periods(
     pyg = workbook["P Y G"]
 
     base_bce_column = _find_bce_month_column(bce, start_year, 12)
-    visible_bce = {4, base_bce_column}
-    visible_pyg = {4, PYG_YEAR_TOTALS[start_year]}
+    pyg_base_column = _find_pyg_total_column(pyg, start_year)
+    bce_account_column = _account_column(bce)
+    pyg_account_column = _account_column(pyg)
+    visible_bce = {bce_account_column, bce_account_column + 1, base_bce_column}
+    visible_pyg = {pyg_account_column, pyg_account_column + 1, pyg_base_column}
 
     if preserve_existing:
         visible_bce.update(
             column
-            for column in range(5, 49)
+            for column in range(1, bce.max_column + 1)
             if not bce.column_dimensions[get_column_letter(column)].hidden
         )
         visible_pyg.update(
             column
-            for column in range(5, 44)
+            for column in range(1, pyg.max_column + 1)
             if not pyg.column_dimensions[get_column_letter(column)].hidden
         )
 
     for year, month in monthly_periods:
-        visible_bce.add(_find_bce_month_column(bce, year, month))
-        visible_pyg.add(_find_pyg_month_column(year, month))
+        bce_column = _find_bce_month_column(bce, year, month)
+        visible_bce.add(bce_column)
+        visible_pyg.add(_find_pyg_month_column(pyg, bce_column, year, month))
 
-    for column in range(5, 49):
+    for column in range(1, bce.max_column + 1):
         bce.column_dimensions[get_column_letter(column)].hidden = column not in visible_bce
-    for column in range(5, 44):
+    for column in range(1, pyg.max_column + 1):
         pyg.column_dimensions[get_column_letter(column)].hidden = column not in visible_pyg
 
     bce_header = bce.cell(2, base_bce_column)
     if not isinstance(bce_header, MergedCell):
         bce_header.value = f"Saldo final {start_year}"
-    pyg_header = pyg.cell(3, PYG_YEAR_TOTALS[start_year])
+    pyg_header = pyg.cell(3, pyg_base_column)
     if not isinstance(pyg_header, MergedCell):
         pyg_header.value = f"Saldo final {start_year}"
 
@@ -185,13 +232,13 @@ def _load_template(previous_file: BinaryIO | None):
 
 def _infer_start_year(workbook) -> int:
     bce = workbook["BCE"]
-    for column in range(5, 49):
+    for column in range(1, bce.max_column + 1):
         value = bce.cell(2, column).value
         if isinstance(value, str) and value.lower().startswith("saldo final"):
             year_text = "".join(character for character in value if character.isdigit())
             if len(year_text) == 4:
                 return int(year_text)
-    for year in sorted(PYG_YEAR_TOTALS, reverse=True):
+    for year in sorted(SUPPORTED_YEARS, reverse=True):
         try:
             column = _find_bce_month_column(bce, year, 12)
         except ValueError:
@@ -365,8 +412,10 @@ def _statement_preview(
     value_label: str,
 ) -> pd.DataFrame:
     rows = []
+    account_column = _account_column(worksheet)
+    concept_column = account_column + 1
     for row in range(1, worksheet.max_row + 1):
-        raw_code = worksheet.cell(row, 3).value
+        raw_code = worksheet.cell(row, account_column).value
         if raw_code is None:
             continue
         code = str(raw_code).replace(".0", "").strip()
@@ -375,11 +424,11 @@ def _statement_preview(
         rows.append(
             {
                 "Cuenta": code,
-                "Concepto": worksheet.cell(row, 4).value or "Sin descripción",
+                "Concepto": worksheet.cell(row, concept_column).value or "Sin descripción",
                 value_label: float(values.get(code, 0.0)),
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["Cuenta", "Concepto", value_label])
 
 
 def build_monthly_reports(
@@ -409,13 +458,13 @@ def build_monthly_reports(
         opening_df, opening_metadata = load_tlg_trial_balance(initial_balance_file)
         opening_detail = prepare_tlg_detail(opening_df)
         opening_year = int(start_year or opening_metadata.get("anio") or 0)
-        if opening_year not in PYG_YEAR_TOTALS:
+        if opening_year not in SUPPORTED_YEARS:
             raise ValueError(
-                f"La plantilla actual solo contiene los años {', '.join(map(str, PYG_YEAR_TOTALS))}."
+                f"La plantilla actual solo contiene los años {', '.join(map(str, sorted(SUPPORTED_YEARS)))}."
             )
         opening_balance, opening_pyg = _account4_values(opening_detail)
         bce_base_column = _find_bce_month_column(bce, opening_year, 12)
-        pyg_base_column = PYG_YEAR_TOTALS[opening_year]
+        pyg_base_column = _find_pyg_total_column(pyg, opening_year)
         bce_count = _write_mapped_accounts(bce, bce_base_column, opening_balance)
         pyg_count = _write_mapped_accounts(pyg, pyg_base_column, opening_pyg)
         summary_rows.append(
@@ -455,7 +504,7 @@ def build_monthly_reports(
         latest_balance_values = balance_values
         latest_pyg_values = pyg_values
         bce_column = _find_bce_month_column(bce, year, month)
-        pyg_column = _find_pyg_month_column(year, month)
+        pyg_column = _find_pyg_month_column(pyg, bce_column, year, month)
         bce_count = _write_mapped_accounts(bce, bce_column, balance_values)
         pyg_count = _write_mapped_accounts(pyg, pyg_column, pyg_values)
         monthly_periods.append((year, month))
