@@ -7,6 +7,7 @@ from typing import BinaryIO
 
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import get_column_letter
 
 from utils.tlg_data_cleaning import MONTHS, load_tlg_trial_balance, normalize_text
@@ -87,7 +88,10 @@ def _write_mapped_accounts(worksheet, column: int, values: dict[str, float]) -> 
         code = str(raw_code).replace(".0", "").strip()
         if not code.isdigit() or len(code) != 4:
             continue
-        worksheet.cell(row, column).value = float(values.get(code, 0.0))
+        target_cell = worksheet.cell(row, column)
+        if isinstance(target_cell, MergedCell):
+            continue
+        target_cell.value = float(values.get(code, 0.0))
         updated += 1
     return updated
 
@@ -98,6 +102,8 @@ def _replace_external_formulas(workbook, cached_workbook) -> None:
         cached_sheet = cached_workbook[sheet_name]
         for row in worksheet.iter_rows():
             for cell in row:
+                if isinstance(cell, MergedCell):
+                    continue
                 if (
                     isinstance(cell.value, str)
                     and cell.value.startswith("=")
@@ -142,8 +148,12 @@ def _configure_visible_periods(
     for column in range(5, 44):
         pyg.column_dimensions[get_column_letter(column)].hidden = column not in visible_pyg
 
-    bce.cell(2, base_bce_column).value = f"Saldo final {start_year}"
-    pyg.cell(3, PYG_YEAR_TOTALS[start_year]).value = f"Saldo final {start_year}"
+    bce_header = bce.cell(2, base_bce_column)
+    if not isinstance(bce_header, MergedCell):
+        bce_header.value = f"Saldo final {start_year}"
+    pyg_header = pyg.cell(3, PYG_YEAR_TOTALS[start_year])
+    if not isinstance(pyg_header, MergedCell):
+        pyg_header.value = f"Saldo final {start_year}"
 
     bce.sheet_state = "visible"
     pyg.sheet_state = "visible"
