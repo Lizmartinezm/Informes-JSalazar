@@ -358,27 +358,35 @@ def _render_generated_report(report: dict[str, object]) -> None:
 
         balance_tab, pyg_tab = st.tabs(["Balance General", "Estado de Resultados"])
         with balance_tab:
-            st.dataframe(
-                report["balance_preview"],
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    report["balance_preview"].columns[-1]: st.column_config.NumberColumn(
-                        format="$ %.0f"
-                    )
-                },
-            )
+            balance_preview = report["balance_preview"]
+            if balance_preview.empty:
+                st.warning("La plantilla no contiene filas de cuentas reconocibles para el Balance General.")
+            else:
+                st.dataframe(
+                    balance_preview,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        balance_preview.columns[-1]: st.column_config.NumberColumn(
+                            format="$ %.0f"
+                        )
+                    },
+                )
         with pyg_tab:
-            st.dataframe(
-                report["pyg_preview"],
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    report["pyg_preview"].columns[-1]: st.column_config.NumberColumn(
-                        format="$ %.0f"
-                    )
-                },
-            )
+            pyg_preview = report["pyg_preview"]
+            if pyg_preview.empty:
+                st.warning("La plantilla no contiene filas de cuentas reconocibles para el Estado de Resultados.")
+            else:
+                st.dataframe(
+                    pyg_preview,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        pyg_preview.columns[-1]: st.column_config.NumberColumn(
+                            format="$ %.0f"
+                        )
+                    },
+                )
 
         st.download_button(
             "Descargar Estados Financieros",
