@@ -20,6 +20,27 @@ def _money(value: float) -> str:
     return "$" + f"{float(value):,.0f}".replace(",", ".")
 
 
+def _period_display_label(period: str) -> str:
+    month_labels = {
+        "01": "Jan",
+        "02": "Feb",
+        "03": "Mar",
+        "04": "Apr",
+        "05": "May",
+        "06": "Jun",
+        "07": "Jul",
+        "08": "Aug",
+        "09": "Sep",
+        "10": "Oct",
+        "11": "Nov",
+        "12": "Dec",
+    }
+    if "/" not in period:
+        return period
+    month, year = period.split("/", maxsplit=1)
+    return f"{month_labels.get(month, month)}-{year[-2:]}"
+
+
 def _monthly_metrics(metrics: pd.DataFrame) -> pd.DataFrame:
     return metrics[metrics["Tipo"] == "Mensual"].sort_values(["Año", "Mes"])
 
@@ -299,6 +320,452 @@ def _preview_file(file_obj, file_type: str) -> dict[str, str]:
     }
 
 
+BALANCE_SECTIONS = [
+    ("ACTIVO CORRIENTE", ("11", "12", "13", "14")),
+    ("ACTIVO NO CORRIENTE", ("15", "16", "17", "18", "19")),
+    ("PATRIMONIO NETO", ("3",)),
+    ("PASIVO NO CORRIENTE", ("2",)),
+    ("PASIVO CORRIENTE", ("2",)),
+]
+
+PYG_SECTIONS = [
+    ("INGRESOS OPERACIONALES", ("41",)),
+    ("COSTOS DIRECTOS", ("61",)),
+    ("GASTOS DE ADMINISTRACIÓN", ("51",)),
+    ("GASTOS DE VENTAS", ("52",)),
+    ("INGRESOS NO OPERACIONALES", ("42", "47")),
+    ("GASTOS NO OPERACIONALES", ("53",)),
+    ("IMPUESTO DE RENTA", ("54",)),
+]
+
+
+def _codes_for_prefixes(pivot: pd.DataFrame, prefixes: tuple[str, ...]) -> list[str]:
+    return [
+        str(code)
+        for code in pivot.index.get_level_values("Codigo")
+        if str(code).startswith(prefixes)
+    ]
+
+
+def _codes_for_section(
+    pivot: pd.DataFrame,
+    statement: str,
+    section_label: str,
+    prefixes: tuple[str, ...],
+) -> list[str]:
+    codes = _codes_for_prefixes(pivot, prefixes)
+    if statement != "balance" or not section_label.startswith("PASIVO"):
+        return codes
+
+    long_term_codes = {"2115", "2195"}
+    for code, concept in pivot.index:
+        normalized_concept = str(concept).upper()
+        if str(code).startswith("2") and (
+            "LARGO PLAZO" in normalized_concept
+            or normalized_concept.endswith(" LP")
+        ):
+            long_term_codes.add(str(code))
+
+    if section_label == "PASIVO NO CORRIENTE":
+        return [code for code in codes if code in long_term_codes]
+    return [code for code in codes if code not in long_term_codes]
+
+
+def _row_values(
+    pivot: pd.DataFrame,
+    codes: list[str],
+    periods: list[str],
+) -> dict[str, float]:
+    if not codes:
+        return {period: 0.0 for period in periods}
+    selected = pivot.loc[
+        pivot.index.get_level_values("Codigo").isin(codes),
+        periods,
+    ]
+    return {
+        period: float(selected[period].sum())
+        for period in periods
+    }
+
+
+def _render_value_row(
+    statement: str,
+    label: str,
+    codes: list[str],
+    values: dict[str, float],
+    periods: list[str],
+    row_kind: str,
+    clickable: bool = True,
+) -> None:
+    row = st.columns([2.65] + [1] * len(periods), gap="small")
+    if row_kind == "section":
+        row[0].markdown(
+            (
+                "<div style='min-height:2.1rem;padding:.42rem .55rem;"
+                "background:#EAECF0;border-top:1px solid #98A2B3;"
+                "border-bottom:1px solid #98A2B3;font-weight:700'>"
+                f"{label}</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+    elif row_kind == "calculation":
+        row[0].markdown(
+            (
+                "<div style='min-height:2.1rem;padding:.42rem .55rem;"
+                "background:#FFF4CC;border-top:1px solid #D7A53F;"
+                "border-bottom:1px solid #D7A53F;font-weight:700'>"
+                f"{label}</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+    else:
+        row[0].markdown(
+            (
+                "<div style='min-height:2.1rem;padding:.42rem .55rem .42rem 1.15rem;"
+                "border-bottom:1px solid #EAECF0'>"
+                f"{label}</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+    for index, period in enumerate(periods, start=1):
+        value = float(values.get(period, 0.0))
+        if abs(value) <= 0.5:
+            row[index].markdown("")
+            continue
+        if not clickable:
+            row[index].markdown(f"**{_money(value)}**")
+            continue
+        key_codes = "-".join(codes) or "none"
+        if row[index].button(
+            _money(value),
+            key=f"client_value_{statement}_{row_kind}_{key_codes}_{period}",
+            width="stretch",
+        ):
+            st.session_state[f"client_selection_{statement}"] = {
+                "Codigos": codes,
+                "Concepto": label,
+                "Periodo": period,
+                "Valor": value,
+            }
+            st.session_state[f"client_detail_open_{statement}"] = True
+
+
+def _statement_detail_frame(
+    report: dict[str, object],
+    statement: str,
+    selection: dict[str, object],
+) -> pd.DataFrame:
+    client_view = report["client_financial_view"]
+    frames = []
+    for code in selection["Codigos"]:
+        detail = client_view.get("details", {}).get(
+            f"{statement}|{selection['Periodo']}|{code}",
+            pd.DataFrame(),
+        )
+        if not detail.empty:
+            frames.append(detail)
+    if not frames:
+        return pd.DataFrame(
+            columns=["Identificación", "Tercero", "Saldo", "Participación"]
+        )
+
+    detail = pd.concat(frames, ignore_index=True)
+    detail = (
+        detail.groupby(["Identificación", "Tercero"], as_index=False)["Saldo"]
+        .sum()
+    )
+    detail = detail[detail["Saldo"].abs() > 0.5]
+    detail = detail.sort_values(
+        "Saldo",
+        key=lambda series: series.abs(),
+        ascending=False,
+    )
+    participation_base = detail["Saldo"].abs().sum()
+    detail["Participación"] = (
+        detail["Saldo"].abs() / participation_base * 100
+        if participation_base
+        else 0
+    )
+    return detail
+
+
+def _render_statement_detail_content(
+    report: dict[str, object],
+    statement: str,
+) -> None:
+    selection = st.session_state.get(f"client_selection_{statement}")
+    if not selection:
+        return
+    detail = _statement_detail_frame(report, statement, selection)
+    if detail.empty:
+        st.info(
+            "No se encontraron terceros en cuentas transaccionales de ocho dígitos "
+            "para el valor seleccionado."
+        )
+        return
+
+    title_col, value_col = st.columns([3, 1])
+    title_col.subheader(
+        f"{selection['Concepto']} · {_period_display_label(selection['Periodo'])}"
+    )
+    value_col.metric("Saldo seleccionado", _money(selection["Valor"]))
+    st.caption(
+        "Detalle agrupado por tercero a partir de las cuentas transaccionales "
+        "de ocho dígitos asociadas al concepto de cuatro dígitos."
+    )
+    st.dataframe(
+        detail[["Identificación", "Tercero", "Saldo", "Participación"]],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Saldo": st.column_config.NumberColumn(format="$ %.0f"),
+            "Participación": st.column_config.ProgressColumn(
+                format="%.1f%%",
+                min_value=0,
+                max_value=100,
+            ),
+        },
+    )
+    detail_total = float(detail["Saldo"].sum())
+    difference = float(selection["Valor"]) - detail_total
+    control_col, difference_col = st.columns(2)
+    control_col.metric("Total explicado por terceros", _money(detail_total))
+    difference_col.metric("Diferencia de control", _money(difference))
+
+
+if hasattr(st, "dialog"):
+    _render_statement_detail_dialog = st.dialog(
+        "Detalle de terceros",
+        width="large",
+    )(_render_statement_detail_content)
+else:
+    _render_statement_detail_dialog = _render_statement_detail_content
+
+
+def _render_client_statement(
+    report: dict[str, object],
+    statement: str,
+    empty_message: str,
+) -> None:
+    client_view = report.get("client_financial_view", {})
+    summary = client_view.get("summary", pd.DataFrame())
+    statement_data = summary[summary["Estado"].eq(statement)].copy()
+    statement_data = statement_data[statement_data["Valor"].abs() > 0.5]
+    statement_data = statement_data.sort_values(["Orden", "Periodo"])
+    if statement_data.empty:
+        st.info(empty_message)
+        return
+
+    active_periods = [
+        period
+        for period in client_view.get("period_order", [])
+        if period in statement_data["Periodo"].unique()
+        and statement_data.loc[
+            statement_data["Periodo"].eq(period),
+            "Valor",
+        ].abs().sum() > 0.5
+    ]
+    selected_periods = st.multiselect(
+        "Periodos visibles",
+        active_periods,
+        default=active_periods,
+        key=f"client_periods_{statement}",
+    )
+    selected_periods = [
+        period for period in active_periods if period in selected_periods
+    ]
+    if not selected_periods:
+        st.info("Selecciona al menos un periodo para mostrar la información.")
+        return
+
+    pivot = statement_data.pivot_table(
+        index=["Codigo", "Concepto"],
+        columns="Periodo",
+        values="Valor",
+        aggfunc="sum",
+        fill_value=0,
+        sort=False,
+    )
+    pivot = pivot.loc[pivot.abs().sum(axis=1) > 0.5, selected_periods]
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
+            min-height: 2.1rem;
+            border-radius: 2px;
+            border-color: #D0D5DD;
+            font-variant-numeric: tabular-nums;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    statement_title = (
+        "BALANCE GENERAL"
+        if statement == "balance"
+        else "ESTADO DE RESULTADOS"
+    )
+    period_years = [
+        period[-4:]
+        for period in selected_periods
+        if period[-4:].isdigit()
+    ]
+    year_text = " · ".join(dict.fromkeys(period_years))
+    st.markdown(f"### {statement_title}")
+    if year_text:
+        st.caption(f"Vista mensualizada · {year_text}")
+    header = st.columns([2.65] + [1] * len(selected_periods), gap="small")
+    header[0].markdown("**Concepto**")
+    for index, period in enumerate(selected_periods, start=1):
+        header[index].markdown(f"**{_period_display_label(period)}**")
+
+    sections = BALANCE_SECTIONS if statement == "balance" else PYG_SECTIONS
+    section_values: dict[str, dict[str, float]] = {}
+    for section_label, prefixes in sections:
+        if statement == "pyg" and section_label == "IMPUESTO DE RENTA":
+            before_tax = {
+                period: section_values.get("UTILIDAD OPERACIONAL", {}).get(period, 0)
+                + section_values.get("INGRESOS NO OPERACIONALES", {}).get(period, 0)
+                - section_values.get("GASTOS NO OPERACIONALES", {}).get(period, 0)
+                for period in selected_periods
+            }
+            section_values["UTILIDAD ANTES DE IMPUESTOS"] = before_tax
+            _render_value_row(
+                statement,
+                "UTILIDAD/PÉRDIDA ANTES DE IMPUESTOS",
+                [],
+                before_tax,
+                selected_periods,
+                "calculation",
+                clickable=False,
+            )
+        codes = _codes_for_section(
+            pivot,
+            statement,
+            section_label,
+            prefixes,
+        )
+        codes = list(dict.fromkeys(codes))
+        values = _row_values(pivot, codes, selected_periods)
+        if sum(abs(value) for value in values.values()) <= 0.5:
+            continue
+        section_values[section_label] = values
+        _render_value_row(
+            statement,
+            section_label,
+            codes,
+            values,
+            selected_periods,
+            "section",
+        )
+        for code in codes:
+            account_rows = pivot[
+                pivot.index.get_level_values("Codigo").eq(code)
+            ]
+            for (_, concept), values_row in account_rows.iterrows():
+                values = {
+                    period: float(values_row.get(period, 0.0))
+                    for period in selected_periods
+                }
+                if sum(abs(value) for value in values.values()) <= 0.5:
+                    continue
+                _render_value_row(
+                    statement,
+                    str(concept),
+                    [code],
+                    values,
+                    selected_periods,
+                    "account",
+                )
+
+        if statement == "pyg" and section_label == "COSTOS DIRECTOS":
+            gross = {
+                period: section_values.get("INGRESOS OPERACIONALES", {}).get(period, 0)
+                - section_values.get("COSTOS DIRECTOS", {}).get(period, 0)
+                for period in selected_periods
+            }
+            section_values["MARGEN BRUTO"] = gross
+            _render_value_row(
+                statement,
+                "Margen Bruto",
+                [],
+                gross,
+                selected_periods,
+                "calculation",
+                clickable=False,
+            )
+        if statement == "pyg" and section_label == "GASTOS DE VENTAS":
+            operating = {
+                period: section_values.get("MARGEN BRUTO", {}).get(period, 0)
+                - section_values.get("GASTOS DE ADMINISTRACIÓN", {}).get(period, 0)
+                - section_values.get("GASTOS DE VENTAS", {}).get(period, 0)
+                for period in selected_periods
+            }
+            section_values["UTILIDAD OPERACIONAL"] = operating
+            _render_value_row(
+                statement,
+                "Utilidad Operacional",
+                [],
+                operating,
+                selected_periods,
+                "calculation",
+                clickable=False,
+            )
+        if statement == "balance" and section_label == "ACTIVO NO CORRIENTE":
+            total_assets = {
+                period: section_values.get("ACTIVO CORRIENTE", {}).get(period, 0)
+                + section_values.get("ACTIVO NO CORRIENTE", {}).get(period, 0)
+                for period in selected_periods
+            }
+            section_values["TOTAL ACTIVO"] = total_assets
+            _render_value_row(
+                statement,
+                "TOTAL ACTIVO",
+                [],
+                total_assets,
+                selected_periods,
+                "calculation",
+                clickable=False,
+            )
+
+    if statement == "balance":
+        total_liabilities_equity = {
+            period: section_values.get("PATRIMONIO NETO", {}).get(period, 0)
+            + section_values.get("PASIVO NO CORRIENTE", {}).get(period, 0)
+            + section_values.get("PASIVO CORRIENTE", {}).get(period, 0)
+            for period in selected_periods
+        }
+        _render_value_row(
+            statement,
+            "TOTAL PASIVO Y PATRIMONIO",
+            [],
+            total_liabilities_equity,
+            selected_periods,
+            "calculation",
+            clickable=False,
+        )
+    else:
+        net_result = {
+            period: section_values.get("UTILIDAD ANTES DE IMPUESTOS", {}).get(period, 0)
+            - section_values.get("IMPUESTO DE RENTA", {}).get(period, 0)
+            for period in selected_periods
+        }
+        _render_value_row(
+            statement,
+            "UTILIDAD DESPUÉS DE IMPUESTOS",
+            [],
+            net_result,
+            selected_periods,
+            "calculation",
+            clickable=False,
+        )
+
+    if st.session_state.pop(f"client_detail_open_{statement}", False):
+        _render_statement_detail_dialog(report, statement)
+
+
 def _render_generated_report(report: dict[str, object]) -> None:
     st.success(
         f"Informe actualizado hasta {report['last_period']}. Base utilizada: {report['source_name']}."
@@ -353,48 +820,26 @@ def _render_generated_report(report: dict[str, object]) -> None:
                 "El balance no cuadra. Revisa el mapeo antes de entregar este informe al cliente."
             )
 
-        st.subheader("Control de archivos procesados")
-        st.dataframe(report["periods"], width="stretch", hide_index=True)
-        account_additions = report.get("account_additions", pd.DataFrame())
-        if not account_additions.empty:
-            st.subheader("Cuentas incorporadas automáticamente")
-            st.info(
-                "Estas cuentas existían en los balances cargados, pero no en la plantilla original. "
-                "La app las ubicó en el estado financiero correspondiente."
-            )
-            st.dataframe(account_additions, width="stretch", hide_index=True)
-
         balance_tab, pyg_tab = st.tabs(["Balance General", "Estado de Resultados"])
         with balance_tab:
-            balance_preview = report["balance_preview"]
-            if balance_preview.empty:
-                st.warning("La plantilla no contiene filas de cuentas reconocibles para el Balance General.")
-            else:
-                st.dataframe(
-                    balance_preview,
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        balance_preview.columns[-1]: st.column_config.NumberColumn(
-                            format="$ %.0f"
-                        )
-                    },
-                )
+            _render_client_statement(
+                report,
+                "balance",
+                "No hay rubros con saldo para mostrar en el Balance General.",
+            )
         with pyg_tab:
-            pyg_preview = report["pyg_preview"]
-            if pyg_preview.empty:
-                st.warning("La plantilla no contiene filas de cuentas reconocibles para el Estado de Resultados.")
-            else:
-                st.dataframe(
-                    pyg_preview,
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        pyg_preview.columns[-1]: st.column_config.NumberColumn(
-                            format="$ %.0f"
-                        )
-                    },
-                )
+            _render_client_statement(
+                report,
+                "pyg",
+                "No hay rubros con movimiento para mostrar en el Estado de Resultados.",
+            )
+
+        with st.expander("Control técnico del procesamiento", expanded=False):
+            st.dataframe(report["periods"], width="stretch", hide_index=True)
+            account_additions = report.get("account_additions", pd.DataFrame())
+            if not account_additions.empty:
+                st.markdown("**Cuentas incorporadas automáticamente**")
+                st.dataframe(account_additions, width="stretch", hide_index=True)
 
         st.download_button(
             "Descargar Estados Financieros",
