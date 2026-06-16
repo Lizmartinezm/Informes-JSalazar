@@ -748,51 +748,17 @@ def _expense_composition(detail: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-CLIENT_RUBRIC_LABELS = {
-    "11": "Efectivo, bancos e inversiones",
-    "12": "Inversiones",
-    "13": "Cuentas por cobrar",
-    "14": "Inventarios",
-    "15": "Propiedad, planta y equipo",
-    "16": "Intangibles y otros activos",
-    "17": "Diferidos y pagos anticipados",
-    "18": "Otros activos",
-    "19": "Valorizaciones y provisiones",
-    "21": "Obligaciones financieras",
-    "22": "Proveedores",
-    "23": "Cuentas por pagar",
-    "24": "Impuestos por pagar",
-    "25": "Obligaciones laborales",
-    "26": "Provisiones",
-    "27": "Pasivos diferidos",
-    "28": "Otros pasivos",
-    "29": "Otros instrumentos de deuda",
-    "31": "Capital social",
-    "32": "Superávit de capital",
-    "33": "Reservas",
-    "34": "Revalorización patrimonial",
-    "35": "Dividendos y participaciones",
-    "36": "Resultado del ejercicio",
-    "37": "Resultados acumulados",
-    "38": "Superávit por valorizaciones",
-    "41": "Ingresos operacionales",
-    "42": "Ingresos no operacionales",
-    "47": "Ajustes y correcciones monetarias",
-    "51": "Gastos de administración",
-    "52": "Gastos de ventas",
-    "53": "Gastos no operacionales",
-    "54": "Impuesto de renta",
-    "59": "Ganancias y pérdidas",
-    "61": "Costo de ventas",
-    "62": "Compras",
-    "71": "Costos de producción",
-    "72": "Mano de obra directa",
-    "73": "Costos indirectos",
-}
-
-
-def _client_rubric_label(group: str) -> str:
-    return CLIENT_RUBRIC_LABELS.get(group, f"Otros rubros del grupo {group}")
+def _statement_account_labels(worksheet) -> dict[str, str]:
+    account_column = _account_column(worksheet)
+    labels: dict[str, str] = {}
+    for row in range(1, worksheet.max_row + 1):
+        code = _account_code(worksheet.cell(row, account_column).value)
+        if code:
+            labels[code] = (
+                str(worksheet.cell(row, account_column + 1).value or f"Cuenta {code}")
+                .strip()
+            )
+    return labels
 
 
 def _client_period_view(
@@ -801,37 +767,43 @@ def _client_period_view(
     balance_values: dict[str, float],
     pyg_values: dict[str, float],
     result_account_code: str,
+    balance_labels: dict[str, str],
+    pyg_labels: dict[str, str],
 ) -> dict[str, object]:
     summary_rows: list[dict[str, object]] = []
-    signed_balance_groups: dict[str, float] = {}
-    for code, value in balance_values.items():
+    ordered_balance_codes = list(balance_labels)
+    ordered_balance_codes.extend(
+        code for code in balance_values if code not in balance_labels
+    )
+    for order, code in enumerate(ordered_balance_codes):
+        value = balance_values.get(code, 0.0)
         if code[:1] not in {"1", "2", "3"}:
             continue
-        group = code[:2]
-        signed_balance_groups[group] = signed_balance_groups.get(group, 0.0) + float(value)
-    for group, value in sorted(signed_balance_groups.items()):
         summary_rows.append(
             {
                 "Estado": "balance",
-                "Grupo": group,
-                "Rubro": _client_rubric_label(group),
+                "Codigo": code,
+                "Concepto": balance_labels.get(code, f"Cuenta {code}"),
+                "Orden": order,
                 "Periodo": period_label,
                 "Valor": abs(float(value)),
             }
         )
 
-    signed_pyg_groups: dict[str, float] = {}
-    for code, value in pyg_values.items():
+    ordered_pyg_codes = list(pyg_labels)
+    ordered_pyg_codes.extend(
+        code for code in pyg_values if code not in pyg_labels
+    )
+    for order, code in enumerate(ordered_pyg_codes):
+        value = pyg_values.get(code, 0.0)
         if code[:1] not in {"4", "5", "6", "7"}:
             continue
-        group = code[:2]
-        signed_pyg_groups[group] = signed_pyg_groups.get(group, 0.0) + float(value)
-    for group, value in sorted(signed_pyg_groups.items()):
         summary_rows.append(
             {
                 "Estado": "pyg",
-                "Grupo": group,
-                "Rubro": _client_rubric_label(group),
+                "Codigo": code,
+                "Concepto": pyg_labels.get(code, f"Cuenta {code}"),
+                "Orden": order,
                 "Periodo": period_label,
                 "Valor": float(value),
             }
@@ -846,8 +818,15 @@ def _client_period_view(
         .str.replace(r"\D", "", regex=True)
         .str[:4]
     )
-    detail = detail[detail["CUENTA_4"].str.len() == 4].copy()
-    detail["Grupo"] = detail["CUENTA_4"].str[:2]
+    full_codes = (
+        detail["CODIGO_CUENTA"]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\D", "", regex=True)
+    )
+    detail = detail[full_codes.str.len().eq(8)].copy()
+    detail["CUENTA_4"] = full_codes.loc[detail.index].str[:4]
     detail["Identificación"] = (
         detail["IDENTIFICACION"]
         .fillna("")
@@ -863,15 +842,15 @@ def _client_period_view(
     balance_detail["Saldo"] = balance_detail["SALDO_FINAL"]
     balance_detail = (
         balance_detail.groupby(
-            ["Grupo", "Identificación", "Tercero"],
+            ["CUENTA_4", "Identificación", "Tercero"],
             as_index=False,
         )["Saldo"]
         .sum()
     )
-    for group, total in signed_balance_groups.items():
+    for code, total in balance_values.items():
         orientation = 1.0 if total >= 0 else -1.0
         balance_detail.loc[
-            balance_detail["Grupo"].eq(group),
+            balance_detail["CUENTA_4"].eq(code),
             "Saldo",
         ] *= orientation
     synthetic_result = float(balance_values.get(result_account_code, 0.0))
@@ -882,7 +861,7 @@ def _client_period_view(
                 pd.DataFrame(
                     [
                         {
-                            "Grupo": result_account_code[:2],
+                            "CUENTA_4": result_account_code,
                             "Identificación": "-",
                             "Tercero": "Resultado acumulado del Estado de Resultados",
                             "Saldo": abs(synthetic_result),
@@ -904,7 +883,7 @@ def _client_period_view(
     )
     pyg_detail = (
         pyg_detail.groupby(
-            ["Grupo", "Identificación", "Tercero"],
+            ["CUENTA_4", "Identificación", "Tercero"],
             as_index=False,
         )["Saldo"]
         .sum()
@@ -912,17 +891,91 @@ def _client_period_view(
 
     details: dict[str, pd.DataFrame] = {}
     for statement, frame in (("balance", balance_detail), ("pyg", pyg_detail)):
-        for group, grouped in frame.groupby("Grupo"):
+        labels = balance_labels if statement == "balance" else pyg_labels
+        for code, grouped in frame.groupby("CUENTA_4"):
             clean = grouped[grouped["Saldo"].abs() > 0.5].copy()
-            clean["Rubro"] = _client_rubric_label(str(group))
+            clean["Concepto"] = labels.get(str(code), f"Cuenta {code}")
             clean["Periodo"] = period_label
             clean = clean.sort_values("Saldo", key=lambda series: series.abs(), ascending=False)
-            details[f"{statement}|{period_label}|{group}"] = clean[
-                ["Periodo", "Rubro", "Identificación", "Tercero", "Saldo"]
+            details[f"{statement}|{period_label}|{code}"] = clean[
+                ["Periodo", "Concepto", "Identificación", "Tercero", "Saldo"]
             ].reset_index(drop=True)
     return {
         "summary": summary_rows,
         "details": details,
+    }
+
+
+def _finalize_client_financial_view(
+    summary_rows: list[dict[str, object]],
+    details: dict[str, pd.DataFrame],
+    opening_period: str | None,
+    monthly_periods: list[tuple[int, int]],
+) -> dict[str, object]:
+    summary = pd.DataFrame(
+        summary_rows,
+        columns=["Estado", "Codigo", "Concepto", "Orden", "Periodo", "Valor"],
+    )
+    if not summary.empty:
+        summary["Orden"] = summary.groupby(
+            ["Estado", "Codigo"],
+        )["Orden"].transform("min")
+    period_order: list[str] = [opening_period] if opening_period else []
+
+    for year in sorted({year for year, _ in monthly_periods}):
+        year_periods = [
+            f"{month:02d}/{period_year}"
+            for period_year, month in monthly_periods
+            if period_year == year
+        ]
+        period_order.extend(year_periods)
+        accumulated_label = f"Acumulado {year}"
+        pyg_year = summary[
+            summary["Estado"].eq("pyg") & summary["Periodo"].isin(year_periods)
+        ]
+        if pyg_year.empty:
+            continue
+        accumulated = (
+            pyg_year.groupby(
+                ["Estado", "Codigo", "Concepto", "Orden"],
+                as_index=False,
+            )["Valor"]
+            .sum()
+        )
+        accumulated["Periodo"] = accumulated_label
+        summary = pd.concat([summary, accumulated], ignore_index=True)
+        period_order.append(accumulated_label)
+
+        for code in accumulated["Codigo"].astype(str).unique():
+            frames = [
+                details[key]
+                for period in year_periods
+                if (key := f"pyg|{period}|{code}") in details
+            ]
+            if not frames:
+                continue
+            combined = pd.concat(frames, ignore_index=True)
+            combined = (
+                combined.groupby(
+                    ["Concepto", "Identificación", "Tercero"],
+                    as_index=False,
+                )["Saldo"]
+                .sum()
+            )
+            combined = combined[combined["Saldo"].abs() > 0.5]
+            combined["Periodo"] = accumulated_label
+            details[f"pyg|{accumulated_label}|{code}"] = combined[
+                ["Periodo", "Concepto", "Identificación", "Tercero", "Saldo"]
+            ].sort_values(
+                "Saldo",
+                key=lambda series: series.abs(),
+                ascending=False,
+            ).reset_index(drop=True)
+
+    return {
+        "summary": summary,
+        "details": details,
+        "period_order": period_order,
     }
 
 
@@ -1003,6 +1056,8 @@ def build_monthly_reports(
             opening_balance,
             opening_pyg,
             result_account_code,
+            _statement_account_labels(bce),
+            _statement_account_labels(pyg),
         )
         client_summary_rows.extend(opening_view["summary"])
         client_details.update(opening_view["details"])
@@ -1063,6 +1118,8 @@ def build_monthly_reports(
             balance_values,
             pyg_values,
             result_account_code,
+            _statement_account_labels(bce),
+            _statement_account_labels(pyg),
         )
         client_summary_rows.extend(period_view["summary"])
         client_details.update(period_view["details"])
@@ -1114,6 +1171,12 @@ def build_monthly_reports(
     metrics = pd.DataFrame(metric_rows)
     third_parties = _third_party_tables(latest_raw_df)
     expense_composition = _expense_composition(latest_detail)
+    client_financial_view = _finalize_client_financial_view(
+        client_summary_rows,
+        client_details,
+        f"Saldo final {opening_year}" if initial_balance_file is not None else None,
+        monthly_periods,
+    )
     balance_preview = _statement_preview(
         bce,
         latest_balance_values,
@@ -1137,17 +1200,7 @@ def build_monthly_reports(
         "account_additions": pd.DataFrame(unique_additions) if unique_additions else pd.DataFrame(
             columns=["Cuenta", "Nombre", "Hoja", "Ubicación", "Motivo"]
         ),
-        "client_financial_view": {
-            "summary": pd.DataFrame(
-                client_summary_rows,
-                columns=["Estado", "Grupo", "Rubro", "Periodo", "Valor"],
-            ),
-            "details": client_details,
-            "period_order": [
-                str(row["Periodo"])
-                for row in summary_rows
-            ],
-        },
+        "client_financial_view": client_financial_view,
         "source_name": source_name,
         "start_year": opening_year,
         "last_period": f"{last_month:02d}/{last_year}",
