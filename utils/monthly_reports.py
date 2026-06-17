@@ -849,12 +849,6 @@ def _client_period_view(
         )["Saldo"]
         .sum()
     )
-    for code, total in balance_values.items():
-        orientation = 1.0 if total >= 0 else -1.0
-        balance_detail.loc[
-            balance_detail["CUENTA_4"].eq(code),
-            "Saldo",
-        ] *= orientation
     synthetic_result = float(balance_values.get(result_account_code, 0.0))
     if abs(synthetic_result) > 0.5:
         balance_detail = pd.concat(
@@ -866,7 +860,7 @@ def _client_period_view(
                             "CUENTA_4": result_account_code,
                             "Identificación": "-",
                             "Tercero": "Resultado acumulado del Estado de Resultados",
-                            "Saldo": abs(synthetic_result),
+                            "Saldo": synthetic_result,
                         }
                     ]
                 ),
