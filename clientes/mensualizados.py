@@ -375,6 +375,8 @@ def _row_values(
     pivot: pd.DataFrame,
     codes: list[str],
     periods: list[str],
+    *,
+    absolute_total: bool = False,
 ) -> dict[str, float]:
     if not codes:
         return {period: 0.0 for period in periods}
@@ -383,7 +385,9 @@ def _row_values(
         periods,
     ]
     return {
-        period: float(selected[period].sum())
+        period: abs(float(selected[period].sum()))
+        if absolute_total
+        else float(selected[period].sum())
         for period in periods
     }
 
@@ -551,6 +555,8 @@ def _render_client_statement(
     client_view = report.get("client_financial_view", {})
     summary = client_view.get("summary", pd.DataFrame())
     statement_data = summary[summary["Estado"].eq(statement)].copy()
+    if "ValorCalculo" not in statement_data.columns:
+        statement_data["ValorCalculo"] = statement_data["Valor"]
     statement_data = statement_data[statement_data["Valor"].abs() > 0.5]
     statement_data = statement_data.sort_values(["Orden", "Periodo"])
     if statement_data.empty:
@@ -588,6 +594,16 @@ def _render_client_statement(
         sort=False,
     )
     pivot = pivot.loc[pivot.abs().sum(axis=1) > 0.5, selected_periods]
+    calc_pivot = statement_data.pivot_table(
+        index=["Codigo", "Concepto"],
+        columns="Periodo",
+        values="ValorCalculo",
+        aggfunc="sum",
+        fill_value=0,
+        sort=False,
+    )
+    calc_pivot = calc_pivot.reindex(pivot.index).fillna(0)
+    calc_pivot = calc_pivot.loc[:, selected_periods]
 
     st.markdown(
         """
@@ -648,7 +664,12 @@ def _render_client_statement(
             prefixes,
         )
         codes = list(dict.fromkeys(codes))
-        values = _row_values(pivot, codes, selected_periods)
+        values = _row_values(
+            calc_pivot,
+            codes,
+            selected_periods,
+            absolute_total=statement == "balance",
+        )
         if sum(abs(value) for value in values.values()) <= 0.5:
             continue
         section_values[section_label] = values
