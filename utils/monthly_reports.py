@@ -787,6 +787,7 @@ def _client_period_view(
                 "Orden": order,
                 "Periodo": period_label,
                 "Valor": abs(float(value)),
+                "ValorCalculo": float(value),
             }
         )
 
@@ -806,6 +807,7 @@ def _client_period_view(
                 "Orden": order,
                 "Periodo": period_label,
                 "Valor": float(value),
+                "ValorCalculo": float(value),
             }
         )
 
@@ -914,7 +916,15 @@ def _finalize_client_financial_view(
 ) -> dict[str, object]:
     summary = pd.DataFrame(
         summary_rows,
-        columns=["Estado", "Codigo", "Concepto", "Orden", "Periodo", "Valor"],
+        columns=[
+            "Estado",
+            "Codigo",
+            "Concepto",
+            "Orden",
+            "Periodo",
+            "Valor",
+            "ValorCalculo",
+        ],
     )
     if not summary.empty:
         summary["Orden"] = summary.groupby(
@@ -939,7 +949,7 @@ def _finalize_client_financial_view(
             pyg_year.groupby(
                 ["Estado", "Codigo", "Concepto", "Orden"],
                 as_index=False,
-            )["Valor"]
+            )[["Valor", "ValorCalculo"]]
             .sum()
         )
         accumulated["Periodo"] = accumulated_label
