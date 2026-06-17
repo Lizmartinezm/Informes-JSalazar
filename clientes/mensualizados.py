@@ -662,7 +662,7 @@ def _render_client_statement(
         )
         for code in codes:
             account_rows = pivot[
-                pivot.index.get_level_values("Codigo").eq(code)
+                pivot.index.get_level_values("Codigo").astype(str) == str(code)
             ]
             for (_, concept), values_row in account_rows.iterrows():
                 values = {
