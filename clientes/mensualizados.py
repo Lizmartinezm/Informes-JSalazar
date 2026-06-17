@@ -17,7 +17,9 @@ from utils.ui_components import info_panel, process_steps, section_header
 
 
 def _money(value: float) -> str:
-    return "$" + f"{float(value):,.0f}".replace(",", ".")
+    amount = float(value)
+    formatted = "$" + f"{abs(amount):,.0f}".replace(",", ".")
+    return f"-{formatted}" if amount < 0 else formatted
 
 
 def _period_display_label(period: str) -> str:
@@ -451,6 +453,7 @@ def _render_value_row(
                 "Concepto": label,
                 "Periodo": period,
                 "Valor": value,
+                "TipoFila": row_kind,
             }
             st.session_state[f"client_detail_open_{statement}"] = True
 
@@ -532,9 +535,13 @@ def _render_statement_detail_content(
         },
     )
     detail_total = float(detail["Saldo"].sum())
-    difference = float(selection["Valor"]) - detail_total
+    if statement == "balance" and selection.get("TipoFila") != "account":
+        comparison_total = abs(detail_total)
+    else:
+        comparison_total = detail_total
+    difference = float(selection["Valor"]) - comparison_total
     control_col, difference_col = st.columns(2)
-    control_col.metric("Total explicado por terceros", _money(detail_total))
+    control_col.metric("Total explicado por terceros", _money(comparison_total))
     difference_col.metric("Diferencia de control", _money(difference))
 
 
@@ -682,8 +689,9 @@ def _render_client_statement(
             "section",
         )
         for code in codes:
-            account_rows = pivot[
-                pivot.index.get_level_values("Codigo").astype(str) == str(code)
+            display_source = calc_pivot if statement == "balance" else pivot
+            account_rows = display_source[
+                display_source.index.get_level_values("Codigo").astype(str) == str(code)
             ]
             for (_, concept), values_row in account_rows.iterrows():
                 values = {
